@@ -829,7 +829,7 @@ def summary():
 
 # ===== STARTUP =====
 init_csv()
-send_message("✅ SIRTS v11 Swing Top80 (Binance.US) deployed — EMA200 Swing Filters active.")
+send_msg("✅ SIRTS v11 Swing Top80 (Binance.US) deployed — EMA200 Swing Filters active.")
 dbg("SIRTS v11 Swing deployed.", "INFO")
 
 try:

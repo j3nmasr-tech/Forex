@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-# swing_bot.py — SWING scanner (1H + 4H) — mirrors your scalp logic but stricter (Style 1 messages)
-# Requirements: requests, pandas, numpy
-# Expects BOT_TOKEN and CHAT_ID in environment variables
+# SIRTS v11 Swing — Top 80 | Binance.US + symbol sanitization + Aggressive Mode + Smart Filters
+# Swing adaptation: EMA200 wave confirmation (1H / 4H / Daily)
+# Signals only (no automation). Requires: requests, pandas, numpy
+# ENV: BOT_TOKEN, CHAT_ID, DEBUG_LEVEL (TRACE/INFO/OFF)
 
 import os
 import re
@@ -9,117 +10,160 @@ import time
 import requests
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timezone
 import csv
 
-# ===== CONFIG / CONSTANTS =====
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID   = os.getenv("CHAT_ID")
+# ===== DEBUG / LOGGING =====
+DEBUG_LEVEL = os.environ.get("DEBUG_LEVEL", "TRACE").upper()
+def dbg(msg, lvl="INFO"):
+    if DEBUG_LEVEL == "OFF":
+        return
+    if DEBUG_LEVEL == "INFO" and lvl == "TRACE":
+        return
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    print(f"[{lvl}] {ts} — {msg}")
 
-CAPITAL = 80.0
-LEVERAGE = 30
-
-# Polling interval: 5 minutes for swing
-CHECK_INTERVAL = 300
-API_CALL_DELAY = 0.05
-
-# Use global Binance so Top 80 real volume is captured
-BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
-BINANCE_PRICE  = "https://api.binance.com/api/v3/ticker/price"
-BINANCE_24H    = "https://api.binance.com/api/v3/ticker/24hr"
-FNG_API        = "https://api.alternative.me/fng/?limit=1"
-
-LOG_CSV = "./sirts_v11_swing_signals.csv"
-
-TOP_SYMBOLS = 80
-
-# Swing timeframes (1H + 4H confirmation)
-TIMEFRAMES_SWING = ["1h", "4h"]
-ENTRY_TF = "1h"
-
-# indicator weights (same as scalp)
-WEIGHT_BIAS   = 0.40
-WEIGHT_TURTLE = 0.25
-WEIGHT_CRT    = 0.20
-WEIGHT_VOLUME = 0.15
-
-# stricter thresholds for swing
-MIN_TF_SCORE_SWING  = 60      # per-TF threshold (stricter)
-CONF_MIN_TFS_SWING  = 2       # require both 1h and 4h to agree
-CONFIDENCE_MIN_SWING = 70.0   # higher overall minimum
-
-MIN_QUOTE_VOLUME = 1_000_000.0
-
-# Exclusions (user requested)
-EXCLUDED = {
-    "SHIBUSDT", "PEPEUSDT", "FLOKIUSDT", "BONKUSDT", "LUNCUSDT", "LUNAUSDT",
-    "WIFUSDT", "DOGEUSDT", "BABYDOGEUSDT", "AIDOGEUSDT", "MEMEUSDT",
-    "TRUMPUSDT", "BIDENUSDT", "1000SHIBUSDT", "1000PEPEUSDT"
-}
-
-RECENT_SIGNAL_SIGNATURE_EXPIRE = 60*60*8   # 8 hours de-dupe
-recent_signals = {}
-
-# ===== HELPERS =====
+# ===== SYMBOL SANITIZATION =====
 def sanitize_symbol(symbol: str) -> str:
     if not symbol or not isinstance(symbol, str):
         return ""
     s = re.sub(r"[^A-Z0-9_.-]", "", symbol.upper())
     return s[:20]
 
+# ===== CONFIG =====
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID   = os.getenv("CHAT_ID")
+
+CAPITAL = 80.0
+LEVERAGE = 30
+COOLDOWN_TIME_DEFAULT = 1800
+COOLDOWN_TIME_SUCCESS = 15 * 60
+COOLDOWN_TIME_FAIL    = 45 * 60
+
+VOLATILITY_THRESHOLD_PCT = 2.5
+VOLATILITY_PAUSE = 1800
+
+# Reduced polling frequency for swing
+CHECK_INTERVAL = 300   # seconds (5 minutes)
+
+API_CALL_DELAY = 0.05
+
+# Swing timeframes: 1h, 4h, daily used for bias and confirmations
+TIMEFRAMES = ["1h", "4h", "1d"]
+WEIGHT_BIAS   = 0.40
+WEIGHT_TURTLE = 0.25
+WEIGHT_CRT    = 0.20
+WEIGHT_VOLUME = 0.15
+
+# ===== Aggressive-mode defaults (kept from scalp) =====
+MIN_TF_SCORE  = 55
+CONF_MIN_TFS  = 2
+CONFIDENCE_MIN = 60.0
+
+MIN_QUOTE_VOLUME = 1_000_000.0
+TOP_SYMBOLS = 80
+
+# ===== BINANCE .US ENDPOINTS =====
+BINANCE_KLINES = "https://api.binance.us/api/v3/klines"
+BINANCE_PRICE  = "https://api.binance.us/api/v3/ticker/price"
+BINANCE_24H    = "https://api.binance.us/api/v3/ticker/24hr"
+FNG_API        = "https://api.alternative.me/fng/?limit=1"
+
+LOG_CSV = "./sirts_v11_swing_signals.csv"
+
+# ===== SAFEGUARDS =====
+STRICT_TF_AGREE = False
+MAX_OPEN_TRADES = 6
+MAX_EXPOSURE_PCT = 0.20
+MIN_MARGIN_USD = 0.25
+MIN_SL_DISTANCE_PCT = 0.0015
+SYMBOL_BLACKLIST = set([])
+RECENT_SIGNAL_SIGNATURE_EXPIRE = 300
+recent_signals = {}
+
+DIRECTIONAL_COOLDOWN_SEC = 3600
+last_directional_trade = {}
+
+# ===== RISK =====
+BASE_RISK = 0.02
+MAX_RISK  = 0.06
+MIN_RISK  = 0.01
+
+# ===== STATE =====
+last_trade_time      = {}
+open_trades          = []
+signals_sent_total   = 0
+signals_hit_total    = 0
+signals_fail_total   = 0
+signals_breakeven    = 0
+total_checked_signals= 0
+skipped_signals      = 0
+last_heartbeat       = time.time()
+last_summary         = time.time()
+volatility_pause_until= 0
+last_trade_result = {}
+
+STATS = {
+    "by_side": {"BUY": {"sent":0,"hit":0,"fail":0,"breakeven":0},
+                "SELL":{"sent":0,"hit":0,"fail":0,"breakeven":0}},
+    "by_tf": {tf: {"sent":0,"hit":0,"fail":0,"breakeven":0} for tf in TIMEFRAMES}
+}
+
+# ===== HELPERS =====
 def send_message(text):
     if not BOT_TOKEN or not CHAT_ID:
-        print("Telegram not configured — message would be:", text.replace("\n", " | "))
+        dbg("Telegram not configured; msg not sent", "INFO")
+        dbg(text, "TRACE")
         return False
     try:
         requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                      data={"chat_id": CHAT_ID, "text": text}, timeout=10)
+                      data={"chat_id": CHAT_ID, "text": text, "parse_mode":"MarkdownV2"}, timeout=10)
         return True
     except Exception as e:
-        print("Telegram send error:", e)
+        dbg(f"Telegram send error: {e}", "INFO")
         return False
 
-def safe_get_json(url, params=None, timeout=8, retries=1):
+def safe_get_json(url, params=None, timeout=6, retries=1):
     for attempt in range(retries + 1):
         try:
             r = requests.get(url, params=params, timeout=timeout)
             r.raise_for_status()
             return r.json()
         except requests.exceptions.RequestException as e:
-            print(f"[HTTP] {e} for {url} params={params} attempt={attempt+1}/{retries+1}")
+            dbg(f"API request error ({e}) for {url} params={params} attempt={attempt+1}/{retries+1}", "TRACE")
             if attempt < retries:
                 time.sleep(0.5 * (attempt + 1))
                 continue
             return None
         except Exception as e:
-            print(f"[ERR] Unexpected error fetching {url}: {e}")
+            dbg(f"Unexpected error fetching {url}: {e}", "INFO")
             return None
 
 def get_top_symbols(n=TOP_SYMBOLS):
-    j = safe_get_json(BINANCE_24H, {}, timeout=8, retries=1)
-    if not j or not isinstance(j, list):
+    data = safe_get_json(BINANCE_24H, {}, timeout=6, retries=1)
+    if not data:
         return ["BTCUSDT","ETHUSDT"]
-    usdt = [d for d in j if d.get("symbol","").endswith("USDT")]
+    usdt = [d for d in data if d.get("symbol","").endswith("USDT")]
     usdt.sort(key=lambda x: float(x.get("quoteVolume",0) or 0), reverse=True)
     syms = [sanitize_symbol(d["symbol"]) for d in usdt[:n]]
-    syms = [s for s in syms if s not in EXCLUDED]
+    dbg(f"Top symbols fetched: {len(syms)}", "TRACE")
     return syms
 
 def get_24h_quote_volume(symbol):
     symbol = sanitize_symbol(symbol)
     if not symbol:
         return 0.0
-    j = safe_get_json(BINANCE_24H, {"symbol": symbol}, timeout=8, retries=1)
+    j = safe_get_json(BINANCE_24H, {"symbol": symbol}, timeout=6, retries=1)
     try:
         return float(j.get("quoteVolume", 0)) if j else 0.0
-    except:
+    except Exception:
         return 0.0
 
 def get_klines(symbol, interval="1h", limit=200):
     symbol = sanitize_symbol(symbol)
     if not symbol:
         return None
-    data = safe_get_json(BINANCE_KLINES, {"symbol":symbol,"interval":interval,"limit":limit}, timeout=8, retries=1)
+    data = safe_get_json(BINANCE_KLINES, {"symbol":symbol,"interval":interval,"limit":limit}, timeout=6, retries=1)
     if not isinstance(data, list):
         return None
     df = pd.DataFrame(data, columns=["t","o","h","l","c","v","ct","qv","tr","tb","tq","ig"])
@@ -128,20 +172,20 @@ def get_klines(symbol, interval="1h", limit=200):
         df.columns = ["open","high","low","close","volume"]
         return df
     except Exception as e:
-        print(f"get_klines parse error for {symbol} {interval}: {e}")
+        dbg(f"get_klines parse error for {symbol} {interval}: {e}", "INFO")
         return None
 
 def get_price(symbol):
     symbol = sanitize_symbol(symbol)
     if not symbol:
         return None
-    j = safe_get_json(BINANCE_PRICE, {"symbol":symbol}, timeout=8, retries=1)
+    j = safe_get_json(BINANCE_PRICE, {"symbol":symbol}, timeout=6, retries=1)
     try:
         return float(j.get("price")) if j else None
-    except:
+    except Exception:
         return None
 
-# ===== INDICATORS (copied from scalp) =====
+# ===== INDICATORS =====
 def detect_crt(df):
     if len(df) < 12:
         return False, False
@@ -195,19 +239,19 @@ def tf_agree(symbol, tf_low, tf_high):
     df_low = get_klines(symbol, tf_low, 100)
     df_high = get_klines(symbol, tf_high, 100)
     if df_low is None or df_high is None or len(df_low) < 30 or len(df_high) < 30:
-        return False
+        return not STRICT_TF_AGREE
     dir_low = get_direction_from_ma(df_low)
     dir_high = get_direction_from_ma(df_high)
     if dir_low is None or dir_high is None:
-        return False
+        return not STRICT_TF_AGREE
     return dir_low == dir_high
 
-# ATR adapted to accept timeframe (4h for swing SL)
-def get_atr(symbol, tf="4h", period=14):
+# ===== ATR & POSITION SIZING (used to compute targets only) =====
+def get_atr(symbol, period=14):
     symbol = sanitize_symbol(symbol)
     if not symbol:
         return None
-    df = get_klines(symbol, tf, period+2)
+    df = get_klines(symbol, "1h", period+1)
     if df is None or len(df) < period+1:
         return None
     h = df["high"].values
@@ -220,11 +264,11 @@ def get_atr(symbol, tf="4h", period=14):
         return None
     return max(float(np.mean(trs)), 1e-8)
 
-def trade_params_swing(symbol, entry, side, atr_tf="4h", atr_multiplier_sl=1.7, tp_mults=(2.8,4.0,6.0), conf_multiplier=1.0):
-    atr = get_atr(symbol, tf=atr_tf, period=14)
+def trade_params(symbol, entry, side, atr_multiplier_sl=1.7, tp_mults=(1.8,2.8,3.8), conf_multiplier=1.0):
+    atr = get_atr(symbol)
     if atr is None:
         return None
-    atr = max(min(atr, entry * 0.08), entry * 0.0001)
+    atr = max(min(atr, entry * 0.05), entry * 0.0001)
     adj_sl_multiplier = atr_multiplier_sl * (1.0 + (0.5 - conf_multiplier) * 0.5)
     if side == "BUY":
         sl  = round(entry - atr * adj_sl_multiplier, 8)
@@ -237,13 +281,6 @@ def trade_params_swing(symbol, entry, side, atr_tf="4h", atr_multiplier_sl=1.7, 
         tp2 = round(entry - atr * tp_mults[1] * conf_multiplier, 8)
         tp3 = round(entry - atr * tp_mults[2] * conf_multiplier, 8)
     return sl, tp1, tp2, tp3
-
-# position sizing kept for reporting only
-MIN_SL_DISTANCE_PCT = 0.0015
-MAX_EXPOSURE_PCT = 0.20
-MIN_MARGIN_USD = 0.25
-MIN_RISK = 0.01
-MAX_RISK = 0.06
 
 def pos_size_units(entry, sl, confidence_pct):
     conf = max(0.0, min(100.0, confidence_pct))
@@ -265,6 +302,7 @@ def pos_size_units(entry, sl, confidence_pct):
         return 0.0, 0.0, 0.0, risk_percent
     return round(units,8), round(margin_req,6), round(exposure,6), risk_percent
 
+# ===== SENTIMENT =====
 def get_fear_greed_value():
     j = safe_get_json(FNG_API, {}, timeout=6, retries=1)
     try:
@@ -280,14 +318,34 @@ def sentiment_label():
         return "greed"
     return "neutral"
 
-# logging init
+# ===== BTC TREND & VOLATILITY =====
+def btc_volatility_spike():
+    df = get_klines("BTCUSDT", "5m", 3)
+    if df is None or len(df) < 3:
+        return False
+    pct = (df["close"].iloc[-1] - df["close"].iloc[0]) / df["close"].iloc[0] * 100.0
+    return abs(pct) >= VOLATILITY_THRESHOLD_PCT
+
+def btc_trend_agree():
+    df1 = get_klines("BTCUSDT", "1h", 300)
+    df4 = get_klines("BTCUSDT", "4h", 300)
+    if df1 is None or df4 is None:
+        return None, None, None
+    b1 = smc_bias(df1)
+    b4 = smc_bias(df4)
+    sma200 = df4["close"].rolling(200).mean().iloc[-1] if len(df4)>=200 else None
+    btc_price = float(df4["close"].iloc[-1])
+    trend_by_sma = "bull" if (sma200 and btc_price > sma200) else ("bear" if sma200 and btc_price < sma200 else None)
+    return (b1 == b4), (b1 if b1==b4 else None), trend_by_sma
+
+# ===== LOGGING CSV =====
 def init_csv():
     if not os.path.exists(LOG_CSV):
         with open(LOG_CSV,"w",newline="") as f:
             writer = csv.writer(f)
             writer.writerow([
-                "timestamp_utc","signal_type","symbol","side","entry","tp1","tp2","tp3","sl",
-                "tf","units","margin_usd","exposure_usd","risk_pct","confidence_pct","breakdown"
+                "timestamp_utc","symbol","side","entry","tp1","tp2","tp3","sl",
+                "tf","units","margin_usd","exposure_usd","risk_pct","confidence_pct","status","breakdown"
             ])
 
 def log_signal(row):
@@ -296,47 +354,175 @@ def log_signal(row):
             writer = csv.writer(f)
             writer.writerow(row)
     except Exception as e:
-        print("log_signal error:", e)
+        dbg(f"log_signal error: {e}", "INFO")
 
-# ===== SWING SCAN & SIGNAL GENERATION =====
-def analyze_symbol_swing(symbol):
-    symbol = sanitize_symbol(symbol)
-    if not symbol:
+def log_trade_close(trade):
+    try:
+        with open(LOG_CSV,"a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                datetime.utcnow().isoformat(), trade["s"], trade["side"], trade.get("entry"),
+                trade.get("tp1"), trade.get("tp2"), trade.get("tp3"), trade.get("sl"),
+                trade.get("entry_tf"), trade.get("units"), trade.get("margin"), trade.get("exposure"),
+                trade.get("risk_pct")*100 if trade.get("risk_pct") else None, trade.get("confidence_pct"),
+                trade.get("st"), trade.get("close_breakdown", "")
+            ])
+    except Exception as e:
+        dbg(f"log_trade_close error: {e}", "INFO")
+
+# ===== NEW WAVE / EMA200 SWING FILTER =====
+def ema(series, span):
+    return series.ewm(span=span).mean()
+
+def wave_swing_ok(symbol, side, entry_price):
+    """
+    Require:
+      - 4H and Daily trend in same direction and aligned with side
+      - Price pulled back near EMA200 on 1H or 4H (within thresholds)
+      - A CRT reversal on 1H (small confirmation)
+    """
+    try:
+        df1 = get_klines(symbol, "1h", limit=400)
+        df4 = get_klines(symbol, "4h", limit=400)
+        d1 = get_klines(symbol, "1d", limit=400)
+        if df1 is None or df4 is None or d1 is None:
+            dbg(f"wave_swing_ok: missing data for {symbol}", "TRACE")
+            return False
+
+        # EMA200 on 4H & Daily
+        if len(df4) < 210 or len(d1) < 210:
+            dbg(f"wave_swing_ok: insufficient length for EMA200 for {symbol}", "TRACE")
+            return False
+
+        ema200_4h = ema(df4["close"], span=200).iloc[-1]
+        ema200_d  = ema(d1["close"], span=200).iloc[-1]
+        close4h = df4["close"].iloc[-1]
+        closed = d1["close"].iloc[-1]
+
+        # Trend check: both 4H & Daily must agree with side
+        if side == "BUY":
+            if not (close4h > ema200_4h and closed > ema200_d):
+                dbg(f"{symbol} wave fail: higher TFs not bullish", "TRACE")
+                return False
+        else:
+            if not (close4h < ema200_4h and closed < ema200_d):
+                dbg(f"{symbol} wave fail: higher TFs not bearish", "TRACE")
+                return False
+
+        # Pullback: check proximity to EMA200 on 1H or 4H
+        ema200_1h = ema(df1["close"], span=200).iloc[-1]
+        price = float(entry_price)
+        # thresholds (tunable)
+        PCT_ABOVE_MAX = 0.02   # price can be up to 2% above EMA (still acceptable)
+        PCT_BELOW_MAX = 0.03   # price can be up to 3% below EMA (acceptable for pullback)
+        # choose the TF (prefer 1H if close to its EMA, else 4H)
+        diff1 = (price - ema200_1h) / ema200_1h
+        diff4 = (price - ema200_4h) / ema200_4h
+
+        ok1 = (-PCT_BELOW_MAX <= diff1 <= PCT_ABOVE_MAX)
+        ok4 = (-PCT_BELOW_MAX <= diff4 <= PCT_ABOVE_MAX)
+
+        if not (ok1 or ok4):
+            dbg(f"{symbol} wave fail: price not near EMA200 (diff1={diff1:.3f}, diff4={diff4:.3f})", "TRACE")
+            return False
+
+        # Final confirmation: CRT on 1H for direction
+        crt_b, crt_s = detect_crt(df1)
+        if side == "BUY" and not crt_b:
+            dbg(f"{symbol} wave fail: CRT buy not present on 1H", "TRACE")
+            return False
+        if side == "SELL" and not crt_s:
+            dbg(f"{symbol} wave fail: CRT sell not present on 1H", "TRACE")
+            return False
+
+        dbg(f"{symbol} wave OK (price near EMA, HTF trend aligned)", "TRACE")
+        return True
+
+    except Exception as e:
+        dbg(f"wave_swing_ok error {symbol}: {e}", "INFO")
+        return False
+
+# ===== UTILITIES for Smart Filters =====
+def bias_recent_flip(symbol, tf, desired_direction, lookback_candles=3):
+    df = get_klines(symbol, tf, limit=lookback_candles + 120)
+    if df is None or len(df) < lookback_candles + 10:
+        return False
+    try:
+        current_bias = smc_bias(df)
+        prior_df = df.iloc[:-lookback_candles]
+        prior_bias = smc_bias(prior_df) if len(prior_df) >= 60 else None
+        return current_bias == desired_direction and prior_bias is not None and prior_bias != desired_direction
+    except Exception:
+        return False
+
+def get_btc_30m_bias():
+    df = get_klines("BTCUSDT", "30m", limit=200)
+    if df is None or len(df) < 60:
+        return None
+    return smc_bias(df)
+
+# ===== ANALYSIS & SIGNAL GENERATION (using your analyze_symbol logic with wave check) =====
+def current_total_exposure():
+    return sum([t.get("exposure", 0) for t in open_trades if t.get("st") == "open"])
+
+def analyze_symbol(symbol):
+    global total_checked_signals, skipped_signals, signals_sent_total, last_trade_time, volatility_pause_until, STATS, recent_signals, last_directional_trade
+    total_checked_signals += 1
+    now = time.time()
+    if time.time() < volatility_pause_until:
+        return False
+
+    if not symbol or not isinstance(symbol, str):
+        skipped_signals += 1
+        return False
+
+    if symbol in SYMBOL_BLACKLIST:
+        skipped_signals += 1
         return False
 
     vol24 = get_24h_quote_volume(symbol)
     if vol24 < MIN_QUOTE_VOLUME:
+        skipped_signals += 1
         return False
 
-    now = time.time()
-    breakdown = {}
+    if last_trade_time.get(symbol, 0) > now:
+        dbg(f"Cooldown active for {symbol}, skipping until {datetime.fromtimestamp(last_trade_time.get(symbol))}", "TRACE")
+        skipped_signals += 1
+        return False
+
+    tf_confirmations = 0
+    chosen_dir      = None
+    chosen_entry    = None
+    chosen_tf       = None
+    confirming_tfs  = []
+    breakdown_per_tf = {}
     per_tf_scores = []
-    confirmations = 0
-    chosen_dir = None
-    chosen_entry = None
-    chosen_tf = None
 
-    # require 1h and 4h MA direction agreement first
-    if not tf_agree(symbol, "1h", "4h"):
-        return False
-
-    for tf in TIMEFRAMES_SWING:
-        df = get_klines(symbol, tf, limit=120)
+    for tf in TIMEFRAMES:
+        df = get_klines(symbol, tf)
         if df is None or len(df) < 60:
-            breakdown[tf] = None
+            breakdown_per_tf[tf] = None
             continue
+
+        tf_index = TIMEFRAMES.index(tf)
+        # for swing, allow strict TF agree but keep your flag
+        if tf_index < len(TIMEFRAMES) - 1:
+            higher_tf = TIMEFRAMES[tf_index + 1]
+            if not tf_agree(symbol, tf, higher_tf):
+                breakdown_per_tf[tf] = {"skipped_due_tf_disagree": True}
+                continue
 
         crt_b, crt_s = detect_crt(df)
         ts_b, ts_s = detect_turtle(df)
-        bias = smc_bias(df)
-        vol_ok = volume_ok(df, required_consecutive=2)
+        bias        = smc_bias(df)
+        vol_ok      = volume_ok(df, required_consecutive=2)
 
         bull_score = (WEIGHT_CRT*(1 if crt_b else 0) + WEIGHT_TURTLE*(1 if ts_b else 0) +
                       WEIGHT_VOLUME*(1 if vol_ok else 0) + WEIGHT_BIAS*(1 if bias=="bull" else 0))*100
         bear_score = (WEIGHT_CRT*(1 if crt_s else 0) + WEIGHT_TURTLE*(1 if ts_s else 0) +
                       WEIGHT_VOLUME*(1 if vol_ok else 0) + WEIGHT_BIAS*(1 if bias=="bear" else 0))*100
 
-        breakdown[tf] = {
+        breakdown_per_tf[tf] = {
             "bull_score": int(bull_score),
             "bear_score": int(bear_score),
             "bias": bias,
@@ -349,100 +535,339 @@ def analyze_symbol_swing(symbol):
 
         per_tf_scores.append(max(bull_score, bear_score))
 
-        if bull_score >= MIN_TF_SCORE_SWING:
-            confirmations += 1
-            chosen_dir = "BUY"
+        if bull_score >= MIN_TF_SCORE:
+            tf_confirmations += 1
+            chosen_dir    = "BUY"
+            chosen_entry  = float(df["close"].iloc[-1])
+            chosen_tf     = tf
+            confirming_tfs.append(tf)
+        elif bear_score >= MIN_TF_SCORE:
+            tf_confirmations += 1
+            chosen_dir   = "SELL"
             chosen_entry = float(df["close"].iloc[-1])
-            chosen_tf = tf if chosen_tf is None else chosen_tf
-        elif bear_score >= MIN_TF_SCORE_SWING:
-            confirmations += 1
-            chosen_dir = "SELL"
-            chosen_entry = float(df["close"].iloc[-1])
-            chosen_tf = tf if chosen_tf is None else chosen_tf
+            chosen_tf    = tf
+            confirming_tfs.append(tf)
 
-    if confirmations < CONF_MIN_TFS_SWING or not chosen_dir or chosen_entry is None:
+    dbg(f"Scanning {symbol}: {tf_confirmations}/{len(TIMEFRAMES)} confirmations. Breakdown: {breakdown_per_tf}", "TRACE")
+
+    if not (tf_confirmations >= CONF_MIN_TFS and chosen_dir and chosen_entry is not None):
         return False
 
     confidence_pct = float(np.mean(per_tf_scores)) if per_tf_scores else 100.0
     confidence_pct = max(0.0, min(100.0, confidence_pct))
-    if confidence_pct < CONFIDENCE_MIN_SWING:
+
+    if confidence_pct < CONFIDENCE_MIN or tf_confirmations < CONF_MIN_TFS:
+        dbg(f"Skipping {symbol}: safety check failed (conf={confidence_pct:.1f}%, tfs={tf_confirmations}).", "TRACE")
+        skipped_signals += 1
+        return False
+
+    if len([t for t in open_trades if t.get("st") == "open"]) >= MAX_OPEN_TRADES:
+        dbg(f"Skipping {symbol}: max open trades reached ({MAX_OPEN_TRADES}).", "TRACE")
+        skipped_signals += 1
         return False
 
     sig = (symbol, chosen_dir, round(chosen_entry, 6))
-    if recent_signals.get(sig, 0) + RECENT_SIGNAL_SIGNATURE_EXPIRE > now:
+    if recent_signals.get(sig, 0) + RECENT_SIGNAL_SIGNATURE_EXPIRE > time.time():
+        dbg(f"Skipping {symbol}: duplicate recent signal {sig}.", "TRACE")
+        skipped_signals += 1
         return False
-    recent_signals[sig] = now
+    recent_signals[sig] = time.time()
 
-    # BTC 4h guard (avoid counter-BTC swing)
-    btc4 = get_klines("BTCUSDT", "4h", limit=200)
-    if btc4 is not None and len(btc4) >= 60:
-        btc_bias_4h = smc_bias(btc4)
-        if (chosen_dir == "BUY" and btc_bias_4h == "bear") or (chosen_dir == "SELL" and btc_bias_4h == "bull"):
-            return False
-
-    tp_sl = trade_params_swing(symbol, chosen_entry, chosen_dir, atr_tf="4h",
-                               conf_multiplier=max(0.6, min(1.2, confidence_pct/100.0 + 0.2)))
-    if not tp_sl:
+    dir_key = (symbol, chosen_dir)
+    if last_directional_trade.get(dir_key, 0) + DIRECTIONAL_COOLDOWN_SEC > time.time():
+        dbg(f"Skipping {symbol}: directional cooldown active for {chosen_dir}.", "TRACE")
+        skipped_signals += 1
         return False
-    sl, tp1, tp2, tp3 = tp_sl
-    units, margin, exposure, risk_used = pos_size_units(chosen_entry, sl, confidence_pct)
 
     sentiment = sentiment_label()
-    # Style 1 message format (clean professional)
-    header = (f"📊 SWING {chosen_dir} {symbol}\n"
-              f"💵 Entry: {chosen_entry}\n"
-              f"🎯 TP1:{tp1} TP2:{tp2} TP3:{tp3}\n"
-              f"🛑 SL: {sl}\n"
-              f"💰 Units:{units} | Margin≈${margin} | Exposure≈${exposure}\n"
-              f"⚠ Risk used: {risk_used*100:.2f}% | Confidence: {confidence_pct:.1f}% | Sentiment:{sentiment}\n"
-              f"🔎 Breakdown: {breakdown}")
 
+    entry = get_price(symbol)
+    if entry is None:
+        skipped_signals += 1
+        return False
+
+    # ----- BTC correlation filter -----
+    btc30_bias = get_btc_30m_bias()
+    if btc30_bias is not None:
+        if chosen_dir == "BUY" and btc30_bias == "bear":
+            dbg(f"Skipping {symbol}: BTC 30m bias is bear; skipping counter-BTC BUY.", "TRACE")
+            skipped_signals += 1
+            return False
+        if chosen_dir == "SELL" and btc30_bias == "bull":
+            dbg(f"Skipping {symbol}: BTC 30m bias is bull; skipping counter-BTC SELL.", "TRACE")
+            skipped_signals += 1
+            return False
+
+    # ----- Dual bias flip rule for reversal trades -----
+    try:
+        higher_tf = "4h" if chosen_tf == "1h" else ("1d" if chosen_tf == "4h" else "1d")
+    except Exception:
+        higher_tf = "4h"
+    df_high = get_klines(symbol, higher_tf, limit=120)
+    bias_high = smc_bias(df_high) if df_high is not None and len(df_high) >= 60 else None
+    if bias_high is not None:
+        is_reversal = (chosen_dir == "BUY" and bias_high == "bear") or (chosen_dir == "SELL" and bias_high == "bull")
+        if is_reversal:
+            flip_1 = bias_recent_flip(symbol, "1h", "bull" if chosen_dir=="BUY" else "bear", lookback_candles=3)
+            flip_4 = bias_recent_flip(symbol, "4h", "bull" if chosen_dir=="BUY" else "bear", lookback_candles=3)
+            if not (flip_1 and flip_4):
+                dbg(f"Skipping {symbol}: reversal detected but dual bias flip missing (1h:{flip_1},4h:{flip_4}).", "TRACE")
+                skipped_signals += 1
+                return False
+
+    # ----- volume consistency check on chosen timeframe -----
+    df_chosen = get_klines(symbol, chosen_tf, limit=120)
+    if df_chosen is None or len(df_chosen) < 10:
+        skipped_signals += 1
+        return False
+    if not volume_ok(df_chosen, required_consecutive=2):
+        dbg(f"Skipping {symbol}: volume consistency failed on {chosen_tf}.", "TRACE")
+        skipped_signals += 1
+        return False
+
+    # ----- SWING WAVE FILTER (EMA200 + pullback + CRT on 1H) -----
+    if not wave_swing_ok(symbol, chosen_dir, entry):
+        dbg(f"Skipping {symbol}: wave swing filter failed.", "TRACE")
+        skipped_signals += 1
+        return False
+
+    conf_multiplier = max(0.5, min(1.3, confidence_pct / 100.0 + 0.5))
+    tp_sl = trade_params(symbol, entry, chosen_dir, conf_multiplier=conf_multiplier)
+    if not tp_sl:
+        skipped_signals += 1
+        return False
+    sl, tp1, tp2, tp3 = tp_sl
+
+    units, margin, exposure, risk_used = pos_size_units(entry, sl, confidence_pct)
+    if units <= 0 or margin <= 0 or exposure <= 0:
+        dbg(f"Skipping {symbol}: invalid position sizing (units:{units}, margin:{margin}).", "TRACE")
+        skipped_signals += 1
+        return False
+
+    if exposure > CAPITAL * MAX_EXPOSURE_PCT:
+        dbg(f"Skipping {symbol}: exposure {exposure} > {MAX_EXPOSURE_PCT*100:.0f}% of capital.", "TRACE")
+        skipped_signals += 1
+        return False
+
+    header = (f"📈 *SWING {chosen_dir} {symbol}*\n"
+              f"Entry: `{entry}`\n"
+              f"TP1: `{tp1}` TP2: `{tp2}` TP3: `{tp3}`\n"
+              f"SL: `{sl}`\n"
+              f"Units: {units} | Margin≈${margin} | Exposure≈${exposure}\n"
+              f"Risk used: {risk_used*100:.2f}% | Confidence: {confidence_pct:.1f}% | Sentiment:{sentiment}\n"
+              f"TF: {chosen_tf}")
     send_message(header)
 
-    log_signal([
-        datetime.utcnow().isoformat(), "SWING", symbol, chosen_dir, chosen_entry, tp1, tp2, tp3, sl,
-        chosen_tf, units, margin, exposure, risk_used*100, confidence_pct, str(breakdown)
-    ])
+    last_directional_trade[dir_key] = time.time()
 
-    print(f"📊 SWING signal: {symbol} {chosen_dir} entry={chosen_entry} conf={confidence_pct:.1f}%")
+    trade_obj = {
+        "s": symbol,
+        "side": chosen_dir,
+        "entry": entry,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "sl": sl,
+        "st": "open",
+        "units": units,
+        "margin": margin,
+        "exposure": exposure,
+        "risk_pct": risk_used,
+        "confidence_pct": confidence_pct,
+        "tp1_taken": False,
+        "tp2_taken": False,
+        "tp3_taken": False,
+        "placed_at": time.time(),
+        "entry_tf": chosen_tf,
+    }
+    open_trades.append(trade_obj)
+    signals_sent_total += 1
+    STATS["by_side"][chosen_dir]["sent"] += 1
+    if chosen_tf in STATS["by_tf"]:
+        STATS["by_tf"][chosen_tf]["sent"] += 1
+    log_signal([
+        datetime.utcnow().isoformat(), symbol, chosen_dir, entry,
+        tp1, tp2, tp3, sl, chosen_tf, units, margin, exposure,
+        risk_used*100, confidence_pct, "open", str(breakdown_per_tf)
+    ])
+    dbg(f"✅ Signal sent for {symbol} at entry {entry}. Confidence {confidence_pct:.1f}%", "INFO")
     return True
 
-# ===== HEARTBEAT & STARTUP =====
+# ===== TRADE CHECK (TP/SL/BREAKEVEN) - kept in case you want to track open_trades file-wise =====
+def check_trades():
+    global signals_hit_total, signals_fail_total, signals_breakeven, STATS, last_trade_time, last_trade_result
+    for t in list(open_trades):
+        if t.get("st") != "open":
+            continue
+        p = get_price(t["s"])
+        if p is None:
+            continue
+        side = t["side"]
+        # BUY logic
+        if side == "BUY":
+            if not t["tp1_taken"] and p >= t["tp1"]:
+                t["tp1_taken"] = True
+                t["sl"] = t["entry"]
+                send_message(f"🎯 {t['s']} TP1 Hit {p} — SL moved to breakeven.")
+                STATS["by_side"]["BUY"]["hit"] += 1
+                STATS["by_tf"][t["entry_tf"]]["hit"] += 1
+                signals_hit_total += 1
+                last_trade_result[t["s"]] = "win"
+                last_trade_time[t["s"]] = time.time() + COOLDOWN_TIME_SUCCESS
+                continue
+            if t["tp1_taken"] and not t["tp2_taken"] and p >= t["tp2"]:
+                t["tp2_taken"] = True
+                send_message(f"🎯 {t['s']} TP2 Hit {p}")
+                STATS["by_side"]["BUY"]["hit"] += 1
+                STATS["by_tf"][t["entry_tf"]]["hit"] += 1
+                signals_hit_total += 1
+                last_trade_result[t["s"]] = "win"
+                last_trade_time[t["s"]] = time.time() + COOLDOWN_TIME_SUCCESS
+                continue
+            if t["tp2_taken"] and not t["tp3_taken"] and p >= t["tp3"]:
+                t["tp3_taken"] = True
+                t["st"] = "closed"
+                send_message(f"🏁 {t['s']} TP3 Hit {p} — Trade closed.")
+                STATS["by_side"]["BUY"]["hit"] += 1
+                STATS["by_tf"][t["entry_tf"]]["hit"] += 1
+                signals_hit_total += 1
+                last_trade_result[t["s"]] = "win"
+                last_trade_time[t["s"]] = time.time() + COOLDOWN_TIME_SUCCESS
+                log_trade_close(t)
+                continue
+            if p <= t["sl"]:
+                if abs(t["sl"] - t["entry"]) < 1e-8:
+                    t["st"] = "breakeven"
+                    signals_breakeven += 1
+                    STATS["by_side"]["BUY"]["breakeven"] += 1
+                    STATS["by_tf"][t["entry_tf"]]["breakeven"] += 1
+                    send_message(f"⚖️ {t['s']} Breakeven SL Hit {p}")
+                    last_trade_result[t["s"]] = "breakeven"
+                    last_trade_time[t["s"]] = time.time() + COOLDOWN_TIME_SUCCESS
+                    log_trade_close(t)
+                else:
+                    t["st"] = "fail"
+                    signals_fail_total += 1
+                    STATS["by_side"]["BUY"]["fail"] += 1
+                    STATS["by_tf"][t["entry_tf"]]["fail"] += 1
+                    send_message(f"❌ {t['s']} SL Hit {p}")
+                    last_trade_result[t["s"]] = "loss"
+                    last_trade_time[t["s"]] = time.time() + COOLDOWN_TIME_FAIL
+                    log_trade_close(t)
+        else:  # SELL
+            if not t["tp1_taken"] and p <= t["tp1"]:
+                t["tp1_taken"] = True
+                t["sl"] = t["entry"]
+                send_message(f"🎯 {t['s']} TP1 Hit {p} — SL moved to breakeven.")
+                STATS["by_side"]["SELL"]["hit"] += 1
+                STATS["by_tf"][t["entry_tf"]]["hit"] += 1
+                signals_hit_total += 1
+                last_trade_result[t["s"]] = "win"
+                last_trade_time[t["s"]] = time.time() + COOLDOWN_TIME_SUCCESS
+                continue
+            if t["tp1_taken"] and not t["tp2_taken"] and p <= t["tp2"]:
+                t["tp2_taken"] = True
+                send_message(f"🎯 {t['s']} TP2 Hit {p}")
+                STATS["by_side"]["SELL"]["hit"] += 1
+                STATS["by_tf"][t["entry_tf"]]["hit"] += 1
+                signals_hit_total += 1
+                last_trade_result[t["s"]] = "win"
+                last_trade_time[t["s"]] = time.time() + COOLDOWN_TIME_SUCCESS
+                continue
+            if t["tp2_taken"] and not t["tp3_taken"] and p <= t["tp3"]:
+                t["tp3_taken"] = True
+                t["st"] = "closed"
+                send_message(f"🏁 {t['s']} TP3 Hit {p} — Trade closed.")
+                STATS["by_side"]["SELL"]["hit"] += 1
+                STATS["by_tf"][t["entry_tf"]]["hit"] += 1
+                signals_hit_total += 1
+                last_trade_result[t["s"]] = "win"
+                last_trade_time[t["s"]] = time.time() + COOLDOWN_TIME_SUCCESS
+                log_trade_close(t)
+                continue
+            if p >= t["sl"]:
+                if abs(t["sl"] - t["entry"]) < 1e-8:
+                    t["st"] = "breakeven"
+                    signals_breakeven += 1
+                    STATS["by_side"]["SELL"]["breakeven"] += 1
+                    STATS["by_tf"][t["entry_tf"]]["breakeven"] += 1
+                    send_message(f"⚖️ {t['s']} Breakeven SL Hit {p}")
+                    last_trade_result[t["s"]] = "breakeven"
+                    last_trade_time[t["s"]] = time.time() + COOLDOWN_TIME_SUCCESS
+                    log_trade_close(t)
+                else:
+                    t["st"] = "fail"
+                    signals_fail_total += 1
+                    STATS["by_side"]["SELL"]["fail"] += 1
+                    STATS["by_tf"][t["entry_tf"]]["fail"] += 1
+                    send_message(f"❌ {t['s']} SL Hit {p}")
+                    last_trade_result[t["s"]] = "loss"
+                    last_trade_time[t["s"]] = time.time() + COOLDOWN_TIME_FAIL
+                    log_trade_close(t)
+
+    # cleanup
+    for t in list(open_trades):
+        if t.get("st") in ("closed", "fail", "breakeven"):
+            try:
+                open_trades.remove(t)
+            except Exception:
+                pass
+
+# ===== HEARTBEAT & SUMMARY =====
 def heartbeat():
-    send_message(f"💓 SWING Heartbeat OK {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
-    print("💓 Heartbeat sent.")
+    send_message(f"💓 Heartbeat OK {datetime.utcnow().strftime('%H:%M UTC')}")
+    dbg("Heartbeat sent.", "INFO")
 
-def main_loop():
-    init_csv()
-    send_message("✅ SWING Bot deployed — Timeframes: 1H+4H | Strict filters active | Top80 (exclusions applied)")
+def summary():
+    total = signals_sent_total
+    hits  = signals_hit_total
+    fails = signals_fail_total
+    breakev = signals_breakeven
+    acc   = (hits / total * 100) if total > 0 else 0.0
+    send_message(f"📊 Daily Summary\nSignals Sent: {total}\nSignals Checked: {total_checked_signals}\nSignals Skipped: {skipped_signals}\n✅ Hits: {hits}\n⚖️ Breakeven: {breakev}\n❌ Fails: {fails}\n🎯 Accuracy: {acc:.1f}%")
+    dbg(f"Daily Summary. Accuracy: {acc:.1f}%", "INFO")
+
+# ===== STARTUP =====
+init_csv()
+send_message("✅ SIRTS v11 Swing Top80 (Binance.US) deployed — EMA200 Swing Filters active.")
+dbg("SIRTS v11 Swing deployed.", "INFO")
+
+try:
+    SYMBOLS = get_top_symbols(TOP_SYMBOLS)
+    dbg(f"Monitoring {len(SYMBOLS)} symbols (Top {TOP_SYMBOLS}).", "INFO")
+except Exception as e:
+    SYMBOLS = ["BTCUSDT","ETHUSDT"]
+    dbg("Warning retrieving top symbols, defaulting to BTCUSDT & ETHUSDT.", "INFO")
+
+# ===== MAIN LOOP =====
+while True:
     try:
-        symbols = get_top_symbols(TOP_SYMBOLS)
-        print(f"Monitoring {len(symbols)} symbols (Top {TOP_SYMBOLS} filtered).")
+        if btc_volatility_spike():
+            volatility_pause_until = time.time() + VOLATILITY_PAUSE
+            send_message(f"⚠️ BTC volatility spike detected — pausing signals for {VOLATILITY_PAUSE//60} minutes.")
+            dbg(f"BTC volatility spike – pausing until {datetime.fromtimestamp(volatility_pause_until)}", "INFO")
+
+        for i, sym in enumerate(SYMBOLS, start=1):
+            dbg(f"[{i}/{len(SYMBOLS)}] Scanning {sym} …", "TRACE")
+            try:
+                analyze_symbol(sym)
+            except Exception as e:
+                dbg(f"Error scanning {sym}: {e}", "INFO")
+            time.sleep(API_CALL_DELAY)
+
+        # We keep trade checking to update CSV / bookkeeping (no automation)
+        check_trades()
+
+        now = time.time()
+        if now - last_heartbeat > 43200:
+            heartbeat()
+            last_heartbeat = now
+        if now - last_summary > 86400:
+            summary()
+            last_summary = now
+
+        dbg("Swing cycle completed", "INFO")
+        time.sleep(CHECK_INTERVAL)
     except Exception as e:
-        print("Warning retrieving top symbols, defaulting to BTCUSDT & ETHUSDT:", e)
-        symbols = ["BTCUSDT","ETHUSDT"]
-
-    last_heartbeat = time.time()
-    while True:
-        try:
-            for i, sym in enumerate(symbols, start=1):
-                print(f"[{i}/{len(symbols)}] Scanning {sym} …")
-                try:
-                    analyze_symbol_swing(sym)
-                except Exception as e:
-                    print(f"Error scanning {sym}: {e}")
-                time.sleep(API_CALL_DELAY)
-
-            now = time.time()
-            if now - last_heartbeat > 3600 * 6:   # heartbeat every 6 hours
-                heartbeat()
-                last_heartbeat = now
-
-            print("Swing cycle completed at", datetime.utcnow().strftime("%H:%M:%S UTC"))
-            time.sleep(CHECK_INTERVAL)
-        except Exception as e:
-            print("Main loop error:", e)
-            time.sleep(10)
-
-if __name__ == "__main__":
-    main_loop()
+        dbg(f"Main loop error: {e}", "INFO")
+        time.sleep(5)

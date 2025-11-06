@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SIRTS v11 Swing — Top 80 | Bybit USDT Perpetual (public endpoints)
+# SIRTS v11 Swing — Top 80 | Bybit USDT Perpetual (v5 API)
 # Converted from Binance -> Bybit (signals only)
 # Requires: requests, pandas, numpy
 # ENV: BOT_TOKEN, CHAT_ID, DEBUG_LEVEL (TRACE/INFO/OFF)
@@ -43,8 +43,8 @@ COOLDOWN_TIME_FAIL    = 45 * 60
 VOLATILITY_THRESHOLD_PCT = 2.5
 VOLATILITY_PAUSE = 1800
 
-# Reduced polling frequency for swing
-CHECK_INTERVAL = 300   # seconds (5 minutes)
+# Reduced polling frequency for swing -> user requested every 30 minutes
+CHECK_INTERVAL = 1800   # seconds (30 minutes)
 
 API_CALL_DELAY = 0.05
 
@@ -63,11 +63,12 @@ CONFIDENCE_MIN = 55.0
 MIN_QUOTE_VOLUME = 1_000_000.0
 TOP_SYMBOLS = 80
 
-# ===== BYBIT PUBLIC ENDPOINTS (USDT linear) =====
-BYBIT_KLINE = "https://api.bybit.com/public/linear/kline"
-BYBIT_TICKERS = "https://api.bybit.com/v2/public/tickers"
-# For last price single-symbol fallback
-BYBIT_SYMBOL_PRICE = "https://api.bybit.com/v2/public/tickers"
+# ===== BYBIT PUBLIC ENDPOINTS (v5 unified for USDT linear) =====
+BYBIT_BASE = "https://api.bybit.com"
+BYBIT_KLINE = f"{BYBIT_BASE}/v5/market/kline"
+BYBIT_TICKERS = f"{BYBIT_BASE}/v5/market/tickers"
+# For last price single-symbol fallback (uses tickers v5)
+BYBIT_SYMBOL_PRICE = f"{BYBIT_BASE}/v5/market/tickers"
 # Fear & Greed unchanged
 FNG_API        = "https://api.alternative.me/fng/?limit=1"
 
@@ -129,7 +130,7 @@ def send_message(text):
 def safe_get_json(url, params=None, timeout=8, retries=1):
     for attempt in range(retries + 1):
         try:
-            r = requests.get(url, params=params, timeout=timeout)
+            r = requests.get(url, params=params or {}, timeout=timeout)
             r.raise_for_status()
             return r.json()
         except requests.exceptions.RequestException as e:
@@ -162,53 +163,55 @@ def tf_to_bybit_interval(tf: str) -> str:
 # ===== SYMBOL / MARKET DATA LAYER (Bybit-friendly, tolerant) =====
 
 def get_top_symbols(n=TOP_SYMBOLS):
-    # Bybit v2 tickers returns many symbols; pick USDT linear with highest quote volume (approx)
-    j = safe_get_json(BYBIT_TICKERS, {}, timeout=8, retries=1)
-    if not j or "result" not in j:
+    # Bybit v5 tickers returns many symbols; pick USDT linear with highest turnover24h
+    j = safe_get_json(BYBIT_TICKERS, {"category": "linear"}, timeout=8, retries=1)
+    if not j or "result" not in j or "list" not in j["result"]:
         # fallback to common
         return ["BTCUSDT","ETHUSDT"]
-    results = j["result"]
-    # Filter for USDT linear perpetual symbols (Bybit naming often includes USDT)
+    results = j["result"]["list"]
+    # Try to compute approximate quote volume = turnover24h if available
+    try:
+        df = pd.DataFrame(results)
+        if "turnover24h" in df.columns:
+            df["turnover24h"] = df["turnover24h"].astype(float, errors="ignore").fillna(0.0)
+            df = df.sort_values("turnover24h", ascending=False)
+            syms = [sanitize_symbol(s) for s in df["symbol"].tolist() if s.endswith("USDT")]
+            return syms[:n] if syms else ["BTCUSDT","ETHUSDT"]
+    except Exception:
+        pass
+    # fallback filter by symbol string
     usdt = [r for r in results if r.get("symbol","").endswith("USDT")]
-    # Try to compute approximate quote volume = last_price * volume (if available)
-    def quote_vol(item):
-        try:
-            price = float(item.get("last_price", 0) or item.get("last_price_e4",0))
-            vol = float(item.get("volume_24h", item.get("volume", 0) or 0))
-            return price * vol
-        except Exception:
-            return 0.0
-    usdt.sort(key=lambda x: quote_vol(x), reverse=True)
     syms = [sanitize_symbol(r["symbol"]) for r in usdt[:n]]
-    dbg(f"Top symbols fetched (Bybit): {len(syms)}", "TRACE")
+    dbg(f"Top symbols fetched (Bybit v5): {len(syms)}", "TRACE")
     return syms if syms else ["BTCUSDT","ETHUSDT"]
 
 def get_24h_quote_volume(symbol):
     symbol = sanitize_symbol(symbol)
     if not symbol:
         return 0.0
-    j = safe_get_json(BYBIT_TICKERS, {}, timeout=8, retries=1)
-    if not j or "result" not in j:
+    j = safe_get_json(BYBIT_TICKERS, {"category": "linear"}, timeout=8, retries=1)
+    if not j or "result" not in j or "list" not in j["result"]:
         return 0.0
-    for item in j["result"]:
+    for item in j["result"]["list"]:
         if sanitize_symbol(item.get("symbol","")) == symbol:
-            # try different fields gracefully
+            # try common v5 fields gracefully
             try:
-                price = float(item.get("last_price", item.get("last_price_e4", 0)) or 0)
-                vol = float(item.get("volume_24h", item.get("volume", 0)) or 0)
-                return price * vol
+                return float(item.get("turnover24h", item.get("turnover", 0) or 0))
             except Exception:
                 try:
-                    return float(item.get("turnover24h", 0) or 0)
+                    price = float(item.get("lastPrice", item.get("last_price", 0) or 0))
+                    vol = float(item.get("volume24h", item.get("volume", 0) or 0))
+                    return price * vol
                 except Exception:
                     return 0.0
     return 0.0
 
 def parse_bybit_kline_result(result):
-    # result typically a list of dicts with keys: open, high, low, close, volume, start_at
-    # Some endpoints return 'result' wrapper.
+    # Accept v5 structure: {"result": {"list": [...]}} as well as older formats and list-of-lists
     rows = []
-    if isinstance(result, dict) and "result" in result and isinstance(result["result"], list):
+    if isinstance(result, dict) and "result" in result and isinstance(result["result"], dict) and "list" in result["result"]:
+        data = result["result"]["list"]
+    elif isinstance(result, dict) and "result" in result and isinstance(result["result"], list):
         data = result["result"]
     elif isinstance(result, list):
         data = result
@@ -216,25 +219,38 @@ def parse_bybit_kline_result(result):
         data = result["data"]
     else:
         data = []
+
     for r in data:
         # handle both dict-of-values and lists
         if isinstance(r, dict):
-            o = r.get("open") or r.get("o") or r.get("Open") or None
-            h = r.get("high") or r.get("h") or None
-            l = r.get("low")  or r.get("l") or None
-            c = r.get("close") or r.get("c") or None
-            v = r.get("volume") or r.get("v") or r.get("qty") or 0
-            if None in (o,h,l,c):
-                continue
-            rows.append([r.get("start_at") or r.get("t") or 0, o, h, l, c, v, None, None, None, None, None, None])
+            # v5 kline list items may be dicts or lists; check keys
+            if "open" in r or "o" in r:
+                o = r.get("open") or r.get("o")
+                h = r.get("high") or r.get("h")
+                l = r.get("low")  or r.get("l")
+                c = r.get("close") or r.get("c")
+                v = r.get("volume") or r.get("v") or r.get("qty") or 0
+                t = r.get("start_at") or r.get("t") or r.get("open_time") or r.get("ts") or 0
+                if None in (o,h,l,c):
+                    continue
+                rows.append([t, o, h, l, c, v, None, None, None, None, None, None])
+            else:
+                # sometimes v5 returns [ts, o,h,l,c,v,turnover]
+                # if dict uses numeric keys, try to interpret
+                try:
+                    # try to extract common numeric-ordered values
+                    vals = [r[k] for k in sorted(r.keys())]
+                    if len(vals) >= 6:
+                        rows.append([vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], None, None, None, None, None, None])
+                except Exception:
+                    continue
         elif isinstance(r, (list, tuple)) and len(r) >= 6:
-            # some APIs return [timestamp, open, high, low, close, volume]
             rows.append([r[0], r[1], r[2], r[3], r[4], r[5], None, None, None, None, None, None])
     return rows
 
 def get_klines(symbol, interval="1h", limit=200):
     """
-    Unified klines fetcher. Tries to parse Bybit 'linear/kline' response; falls back to
+    Unified klines fetcher. Tries to parse Bybit v5 'kline' response; falls back to
     attempting Binance-style parsing if encountered.
     Returns pandas.DataFrame with columns open,high,low,close,volume or None.
     """
@@ -242,17 +258,14 @@ def get_klines(symbol, interval="1h", limit=200):
     if not symbol:
         return None
 
-    # Choose interval param for Bybit
+    # Choose interval param for Bybit v5
     bybit_interval = tf_to_bybit_interval(interval)
-    params = {"symbol": symbol, "interval": bybit_interval, "limit": limit}
+    params = {"category": "linear", "symbol": symbol, "interval": bybit_interval, "limit": limit}
     j = safe_get_json(BYBIT_KLINE, params=params, timeout=8, retries=1)
     rows = parse_bybit_kline_result(j)
     # If no rows (maybe the endpoint returned Binance style), try Binance-like fallback:
     if not rows:
-        # fallback to Binance-format (in case user uses local dev or other)
-        # Some public proxies return list of lists [t,o,h,l,c,v,...]
         if isinstance(j, list):
-            # assume Binance list-of-lists
             for r in j:
                 try:
                     rows.append([r[0], r[1], r[2], r[3], r[4], r[5], None, None, None, None, None, None])
@@ -274,19 +287,32 @@ def get_price(symbol):
     symbol = sanitize_symbol(symbol)
     if not symbol:
         return None
-    # Bybit ticker endpoint returns many tickers; query and find symbol
-    j = safe_get_json(BYBIT_SYMBOL_PRICE, {}, timeout=6, retries=1)
+    # Bybit v5 tickers endpoint returns many tickers; query category=linear and find symbol
+    j = safe_get_json(BYBIT_SYMBOL_PRICE, {"category": "linear"}, timeout=6, retries=1)
     if not j or "result" not in j:
         return None
-    for item in j["result"]:
-        if sanitize_symbol(item.get("symbol","")) == symbol:
-            try:
-                return float(item.get("last_price", item.get("last_price_e4", item.get("last_price_e4"))))
-            except Exception:
+    # result.list contains dicts with fields like lastPrice, lastTickDirection, etc.
+    try:
+        items = j["result"].get("list", [])
+        for item in items:
+            if sanitize_symbol(item.get("symbol","")) == symbol:
+                # try common v5 fields
+                for key in ("lastPrice", "last_price", "last_price_e4", "last_price_e8", "last_price_e6"):
+                    if key in item and item.get(key) is not None:
+                        try:
+                            return float(item.get(key))
+                        except Exception:
+                            continue
+                # fallback to fields used previously
                 try:
-                    return float(item.get("last_price", 0))
+                    return float(item.get("lastPrice", item.get("last_price", item.get("last_price_e4", 0))))
                 except Exception:
-                    return None
+                    try:
+                        return float(item.get("last_price", 0))
+                    except Exception:
+                        return None
+    except Exception:
+        pass
     return None
 
 # ===== INDICATORS (unchanged) =====
@@ -750,6 +776,7 @@ def analyze_symbol(symbol):
         f"Risk used: {risk_used*100:.2f}% | Confidence: {confidence_pct:.1f}% | Sentiment:{sentiment}\n"
         f"TF: {chosen_tf}"
     )
+    # use existing send_message wrapper (Telegram)
     send_message(header)
 
     last_directional_trade[dir_key] = time.time()

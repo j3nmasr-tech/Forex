@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# SIRTS v11 Swing — Top 80 | Binance (global)
-# Swing adaptation: EMA200 wave confirmation (1H / 4H / Daily)
-# Signals only (no automation). Requires: requests, pandas, numpy
+# SIRTS v11 Swing — Top 80 | Bybit USDT Perpetual (public endpoints)
+# Converted from Binance -> Bybit (signals only)
+# Requires: requests, pandas, numpy
 # ENV: BOT_TOKEN, CHAT_ID, DEBUG_LEVEL (TRACE/INFO/OFF)
 
 import os
@@ -57,19 +57,21 @@ WEIGHT_VOLUME = 0.15
 
 # ===== Ultra-safe swing defaults (you chose B) =====
 MIN_TF_SCORE  = 55
-CONF_MIN_TFS  = 2       # REQUIRE 3 out of 3 (ultra safe)
+CONF_MIN_TFS  = 2       # REQUIRE 2 out of 3 (you set earlier 2)
 CONFIDENCE_MIN = 55.0
 
 MIN_QUOTE_VOLUME = 1_000_000.0
 TOP_SYMBOLS = 80
 
-# ===== BINANCE global ENDPOINTS =====
-BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
-BINANCE_PRICE  = "https://api.binance.com/api/v3/ticker/price"
-BINANCE_24H    = "https://api.binance.com/api/v3/ticker/24hr"
+# ===== BYBIT PUBLIC ENDPOINTS (USDT linear) =====
+BYBIT_KLINE = "https://api.bybit.com/public/linear/kline"
+BYBIT_TICKERS = "https://api.bybit.com/v2/public/tickers"
+# For last price single-symbol fallback
+BYBIT_SYMBOL_PRICE = "https://api.bybit.com/v2/public/tickers"
+# Fear & Greed unchanged
 FNG_API        = "https://api.alternative.me/fng/?limit=1"
 
-LOG_CSV = "./sirts_v11_swing_signals.csv"
+LOG_CSV = "./sirts_v11_swing_signals_bybit.csv"
 
 # ===== SAFEGUARDS =====
 STRICT_TF_AGREE = False
@@ -140,53 +142,154 @@ def safe_get_json(url, params=None, timeout=8, retries=1):
             dbg(f"Unexpected error fetching {url}: {e}", "INFO")
             return None
 
+# map our friendly timeframe to Bybit interval string
+def tf_to_bybit_interval(tf: str) -> str:
+    tf = tf.lower()
+    if tf == "1m": return "1"
+    if tf == "3m": return "3"
+    if tf == "5m": return "5"
+    if tf == "15m": return "15"
+    if tf == "30m": return "30"
+    if tf == "1h": return "60"
+    if tf == "2h": return "120"
+    if tf == "4h": return "240"
+    if tf == "6h": return "360"
+    if tf == "12h": return "720"
+    if tf == "1d": return "D"
+    if tf == "1w": return "W"
+    return "60"
+
+# ===== SYMBOL / MARKET DATA LAYER (Bybit-friendly, tolerant) =====
+
 def get_top_symbols(n=TOP_SYMBOLS):
-    data = safe_get_json(BINANCE_24H, {}, timeout=8, retries=1)
-    if not data:
+    # Bybit v2 tickers returns many symbols; pick USDT linear with highest quote volume (approx)
+    j = safe_get_json(BYBIT_TICKERS, {}, timeout=8, retries=1)
+    if not j or "result" not in j:
+        # fallback to common
         return ["BTCUSDT","ETHUSDT"]
-    usdt = [d for d in data if d.get("symbol","").endswith("USDT")]
-    usdt.sort(key=lambda x: float(x.get("quoteVolume",0) or 0), reverse=True)
-    syms = [sanitize_symbol(d["symbol"]) for d in usdt[:n]]
-    dbg(f"Top symbols fetched: {len(syms)}", "TRACE")
-    return syms
+    results = j["result"]
+    # Filter for USDT linear perpetual symbols (Bybit naming often includes USDT)
+    usdt = [r for r in results if r.get("symbol","").endswith("USDT")]
+    # Try to compute approximate quote volume = last_price * volume (if available)
+    def quote_vol(item):
+        try:
+            price = float(item.get("last_price", 0) or item.get("last_price_e4",0))
+            vol = float(item.get("volume_24h", item.get("volume", 0) or 0))
+            return price * vol
+        except Exception:
+            return 0.0
+    usdt.sort(key=lambda x: quote_vol(x), reverse=True)
+    syms = [sanitize_symbol(r["symbol"]) for r in usdt[:n]]
+    dbg(f"Top symbols fetched (Bybit): {len(syms)}", "TRACE")
+    return syms if syms else ["BTCUSDT","ETHUSDT"]
 
 def get_24h_quote_volume(symbol):
     symbol = sanitize_symbol(symbol)
     if not symbol:
         return 0.0
-    j = safe_get_json(BINANCE_24H, {"symbol": symbol}, timeout=8, retries=1)
-    try:
-        return float(j.get("quoteVolume", 0)) if j else 0.0
-    except Exception:
+    j = safe_get_json(BYBIT_TICKERS, {}, timeout=8, retries=1)
+    if not j or "result" not in j:
         return 0.0
+    for item in j["result"]:
+        if sanitize_symbol(item.get("symbol","")) == symbol:
+            # try different fields gracefully
+            try:
+                price = float(item.get("last_price", item.get("last_price_e4", 0)) or 0)
+                vol = float(item.get("volume_24h", item.get("volume", 0)) or 0)
+                return price * vol
+            except Exception:
+                try:
+                    return float(item.get("turnover24h", 0) or 0)
+                except Exception:
+                    return 0.0
+    return 0.0
+
+def parse_bybit_kline_result(result):
+    # result typically a list of dicts with keys: open, high, low, close, volume, start_at
+    # Some endpoints return 'result' wrapper.
+    rows = []
+    if isinstance(result, dict) and "result" in result and isinstance(result["result"], list):
+        data = result["result"]
+    elif isinstance(result, list):
+        data = result
+    elif isinstance(result, dict) and "data" in result and isinstance(result["data"], list):
+        data = result["data"]
+    else:
+        data = []
+    for r in data:
+        # handle both dict-of-values and lists
+        if isinstance(r, dict):
+            o = r.get("open") or r.get("o") or r.get("Open") or None
+            h = r.get("high") or r.get("h") or None
+            l = r.get("low")  or r.get("l") or None
+            c = r.get("close") or r.get("c") or None
+            v = r.get("volume") or r.get("v") or r.get("qty") or 0
+            if None in (o,h,l,c):
+                continue
+            rows.append([r.get("start_at") or r.get("t") or 0, o, h, l, c, v, None, None, None, None, None, None])
+        elif isinstance(r, (list, tuple)) and len(r) >= 6:
+            # some APIs return [timestamp, open, high, low, close, volume]
+            rows.append([r[0], r[1], r[2], r[3], r[4], r[5], None, None, None, None, None, None])
+    return rows
 
 def get_klines(symbol, interval="1h", limit=200):
+    """
+    Unified klines fetcher. Tries to parse Bybit 'linear/kline' response; falls back to
+    attempting Binance-style parsing if encountered.
+    Returns pandas.DataFrame with columns open,high,low,close,volume or None.
+    """
     symbol = sanitize_symbol(symbol)
     if not symbol:
         return None
-    data = safe_get_json(BINANCE_KLINES, {"symbol":symbol,"interval":interval,"limit":limit}, timeout=8, retries=1)
-    if not isinstance(data, list):
+
+    # Choose interval param for Bybit
+    bybit_interval = tf_to_bybit_interval(interval)
+    params = {"symbol": symbol, "interval": bybit_interval, "limit": limit}
+    j = safe_get_json(BYBIT_KLINE, params=params, timeout=8, retries=1)
+    rows = parse_bybit_kline_result(j)
+    # If no rows (maybe the endpoint returned Binance style), try Binance-like fallback:
+    if not rows:
+        # fallback to Binance-format (in case user uses local dev or other)
+        # Some public proxies return list of lists [t,o,h,l,c,v,...]
+        if isinstance(j, list):
+            # assume Binance list-of-lists
+            for r in j:
+                try:
+                    rows.append([r[0], r[1], r[2], r[3], r[4], r[5], None, None, None, None, None, None])
+                except Exception:
+                    continue
+    if not rows:
         return None
-    df = pd.DataFrame(data, columns=["t","o","h","l","c","v","ct","qv","tr","tb","tq","ig"])
+
+    df = pd.DataFrame(rows, columns=["t","o","h","l","c","v","ct","qv","tr","tb","tq","ig"])
     try:
         df = df[["o","h","l","c","v"]].astype(float)
         df.columns = ["open","high","low","close","volume"]
         return df
     except Exception as e:
-        dbg(f"get_klines parse error for {symbol} {interval}: {e}", "INFO")
+        dbg(f"⚠️ get_klines parse error for {symbol} {interval}: {e}", "INFO")
         return None
 
 def get_price(symbol):
     symbol = sanitize_symbol(symbol)
     if not symbol:
         return None
-    j = safe_get_json(BINANCE_PRICE, {"symbol":symbol}, timeout=6, retries=1)
-    try:
-        return float(j.get("price")) if j else None
-    except Exception:
+    # Bybit ticker endpoint returns many tickers; query and find symbol
+    j = safe_get_json(BYBIT_SYMBOL_PRICE, {}, timeout=6, retries=1)
+    if not j or "result" not in j:
         return None
+    for item in j["result"]:
+        if sanitize_symbol(item.get("symbol","")) == symbol:
+            try:
+                return float(item.get("last_price", item.get("last_price_e4", item.get("last_price_e4"))))
+            except Exception:
+                try:
+                    return float(item.get("last_price", 0))
+                except Exception:
+                    return None
+    return None
 
-# ===== INDICATORS =====
+# ===== INDICATORS (unchanged) =====
 def detect_crt(df):
     if len(df) < 12:
         return False, False
@@ -247,7 +350,7 @@ def tf_agree(symbol, tf_low, tf_high):
         return not STRICT_TF_AGREE
     return dir_low == dir_high
 
-# ===== ATR & POSITION SIZING (used to compute targets only) =====
+# ===== ATR & POSITION SIZING (unchanged) =====
 def get_atr(symbol, period=14):
     symbol = sanitize_symbol(symbol)
     if not symbol:
@@ -819,8 +922,8 @@ def summary():
 
 # ===== STARTUP =====
 init_csv()
-send_message("✅ SIRTS v11 Swing Top80 (Binance) deployed — EMA200 Swing Filters active.")
-dbg("SIRTS v11 Swing deployed.", "INFO")
+send_message("✅ SIRTS v11 Swing Top80 (Bybit USDT Perp) deployed — EMA200 Swing Filters active.")
+dbg("SIRTS v11 Swing (Bybit) deployed.", "INFO")
 
 try:
     SYMBOLS = get_top_symbols(TOP_SYMBOLS)

@@ -577,9 +577,25 @@ def bias_recent_flip(symbol, tf, desired_direction, lookback_candles=3):
 def get_btc_30m_bias():
     df = get_klines("BTCUSDT", "30m", limit=200)
     if df is None or len(df) < 60:
-        return None
-    return smc_bias(df)
+        # fallback to default bias
+        return "bull"
+    try:
+        return smc_bias(df)
+    except Exception:
+        return "bull"
 
+def get_btc_1h_bias():
+    """
+    Returns BTC 1-hour bias for correlation filtering.
+    """
+    df = get_klines("BTCUSDT", "1h", limit=200)
+    if df is None or len(df) < 60:
+        # fallback to default bias
+        return "bull"
+    try:
+        return smc_bias(df)
+    except Exception:
+        return "bull"
 # ===== ANALYSIS & SIGNAL GENERATION =====
 def current_total_exposure():
     return sum([t.get("exposure", 0) for t in open_trades if t.get("st") == "open"])
@@ -704,23 +720,17 @@ def analyze_symbol(symbol):
         skipped_signals += 1
         return False
 
-# === BTC 1h correlation filter ===
+# BTC 1h correlation filter
 btc1h_bias = get_btc_1h_bias()  # fetch 1-hour BTC bias
-skip_signal = False
-
 if btc1h_bias is not None:
     if chosen_dir == "BUY" and btc1h_bias == "bear":
         dbg(f"Skipping {symbol}: BTC 1h bias is bear; skipping counter-BTC BUY.", "TRACE")
         skipped_signals += 1
-        skip_signal = True
-    elif chosen_dir == "SELL" and btc1h_bias == "bull":
+        return False
+    if chosen_dir == "SELL" and btc1h_bias == "bull":
         dbg(f"Skipping {symbol}: BTC 1h bias is bull; skipping counter-BTC SELL.", "TRACE")
         skipped_signals += 1
-        skip_signal = True
-
-# Skip this symbol if BTC bias opposes trade
-if skip_signal:
-    continue  # moves to next symbol in your scanning loop
+        return False
     # Dual bias flip rule for reversal trades
     try:
         higher_tf = "4h" if chosen_tf == "1h" else ("1d" if chosen_tf == "4h" else "1d")

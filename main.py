@@ -321,21 +321,12 @@ def sentiment_label():
     return "neutral"
 
 # ===== NEWS FILTER (N2) =====
-# Blocks new entries during high-impact macro events.
-# Behavior:
-#  - If NEWS_API_KEY is present, query Finnhub economic calendar for today and next day and block windows around high-impact events.
-#  - If NEWS_API_KEY is not present, fallback: block NFP windows (first Friday each month at 13:30 UTC) and US CPI windows (approximate common times) — conservative fallback.
-# Configurable via env vars:
 NEWS_WINDOW_BEFORE = int(os.getenv("NEWS_WINDOW_BEFORE", 30*60))   # seconds before event to block (default 30min)
 NEWS_WINDOW_AFTER  = int(os.getenv("NEWS_WINDOW_AFTER", 60*60))    # seconds after event to block (default 60min)
 
 def is_nfp_date(dt_utc: datetime):
-    # NFP is released the first Friday of each month (US) at 13:30 UTC (8:30 ET) commonly.
-    # This fallback approximates that. If you use NEWS_API_KEY, Finnhub will be used instead.
-    # Note: exact schedule sometimes varies — use NEWS_API_KEY for production accuracy.
     year = dt_utc.year
     month = dt_utc.month
-    # find first friday
     cal = calendar.monthcalendar(year, month)
     first_friday = None
     for week in cal:
@@ -348,8 +339,6 @@ def is_nfp_date(dt_utc: datetime):
     return abs((dt_utc - event_dt).total_seconds()) <= max(NEWS_WINDOW_BEFORE, NEWS_WINDOW_AFTER)
 
 def fetch_finnhub_events(start_dt: datetime, end_dt: datetime):
-    # Finnhub economic calendar endpoint (example):
-    # https://finnhub.io/api/v1/calendar/economic?from=YYYY-MM-DD&to=YYYY-MM-DD&token=TOKEN
     if not NEWS_API_KEY:
         return []
     try:
@@ -359,36 +348,28 @@ def fetch_finnhub_events(start_dt: datetime, end_dt: datetime):
         events = []
         if not j:
             return events
-        # j typically has fields 'economic' etc. Attempt to parse common structures.
         data = j.get("economic") or j.get("economicEvents") or j.get("data") or j
         if isinstance(data, dict):
-            # some responses embed results
             data = data.get("data") or []
         if not isinstance(data, list):
             return events
         for e in data:
-            # we only want high-impact (importance) events, attempt to read 'impact' or 'importance' field
             impact = e.get("impact") or e.get("importance") or e.get("significance") or ""
-            # try to extract time
             date_str = e.get("date") or e.get("time") or e.get("datetime") or e.get("local_date")
             if not date_str:
                 continue
             try:
-                # many calendars return yyyy-mm-dd or yyyy-mm-dd HH:MM:SS
                 if "T" in date_str:
                     dt = datetime.fromisoformat(date_str.replace("Z", "+00:00")).replace(tzinfo=None)
                 else:
                     dt = datetime.fromisoformat(date_str)
             except:
-                # fallback ignore parse issues
                 continue
-            # accept events listed as 'high' importance or '1' etc.
             importance = 0
             try:
                 importance = int(e.get("importance") or e.get("impact_level") or 0)
             except:
                 importance = 0
-            # heuristics: treat 'High', 'High Impact', importance>=2 as high
             if (isinstance(impact, str) and "high" in impact.lower()) or importance >= 2:
                 events.append({"dt": dt, "title": e.get("title") or e.get("name") or "event", "importance": importance})
         return events
@@ -398,22 +379,18 @@ def fetch_finnhub_events(start_dt: datetime, end_dt: datetime):
 
 def is_news_window_now():
     now = datetime.utcnow()
-    # 1) try finnHub if API key available
     if NEWS_API_KEY:
         start = now - timedelta(days=1)
         end = now + timedelta(days=1)
         events = fetch_finnhub_events(start, end)
         for ev in events:
             ev_dt = ev["dt"]
-            # treat times as UTC (best-effort). Block window around event.
             if abs((now - ev_dt).total_seconds()) <= (NEWS_WINDOW_BEFORE + NEWS_WINDOW_AFTER):
                 print(f"News window active (Finnhub): {ev.get('title')} at {ev_dt}")
                 return True
-    # 2) fallback conservative checks (NFP)
     if is_nfp_date(now):
         print("News window active (fallback NFP detection).")
         return True
-    # optional: block US CPI on approximate release days (2nd Tuesday-ish) — omitted for accuracy.
     return False
 
 # ===== LOGGING helpers (unchanged) =====
@@ -447,6 +424,40 @@ def log_trade_close(trade):
             ])
     except Exception as e:
         print("log_trade_close error:", e)
+
+# ===== BTC VOLATILITY SPIKE FILTER (ADDED) =====
+def btc_volatility_spike(threshold_pct=None, atr_period=14, lookback=80):
+    """
+    Returns True if BTC 1h ATR% over last atr_period bars exceeds threshold_pct.
+    Uses get_klines("BTCUSDT","1h", limit=lookback).
+    """
+    if threshold_pct is None:
+        threshold_pct = VOLATILITY_THRESHOLD_PCT
+    df = get_klines("BTCUSDT", "1h", lookback)
+    if df is None or len(df) < max(atr_period+1, 20):
+        return False
+    try:
+        # compute TRs
+        h = df["high"].values if "high" in df.columns else None
+        l = df["low"].values if "low" in df.columns else None
+        c = df["close"].values if "close" in df.columns else None
+        # if high/low/close not available from this df structure, try to fetch more detailed klines
+        if h is None or l is None or c is None:
+            return False
+        trs = []
+        for i in range(1, len(df)):
+            trs.append(max(h[i]-l[i], abs(h[i]-c[i-1]), abs(l[i]-c[i-1])))
+        if len(trs) < atr_period:
+            return False
+        atr = float(np.mean(trs[-atr_period:]))
+        last_close = float(df["close"].iloc[-1])
+        atr_pct = (atr / last_close) * 100.0
+        # debug print
+        print(f"BTC ATR%: {atr_pct:.3f} (threshold {threshold_pct}%)")
+        return atr_pct > threshold_pct
+    except Exception as e:
+        print("btc_volatility_spike error:", e)
+        return False
 
 # ===== ANALYSIS & SIGNAL GENERATION (mostly unchanged) =====
 def current_total_exposure():
@@ -784,10 +795,17 @@ except Exception as e:
 # ===== MAIN LOOP =====
 while True:
     try:
+        # respect existing pause window due to volatility
+        if time.time() < volatility_pause_until:
+            print("⏸️ Volatility pause active… waiting.")
+            time.sleep(10)
+            continue
+
         if btc_volatility_spike():
             volatility_pause_until = time.time() + VOLATILITY_PAUSE
             send_message(f"⚠️ BTC volatility spike detected — pausing signals for {VOLATILITY_PAUSE//60} minutes.")
             print(f"⚠️ BTC volatility spike – pausing until {datetime.fromtimestamp(volatility_pause_until)}")
+            continue
 
         for i, sym in enumerate(SYMBOLS, start=1):
             print(f"[{i}/{len(SYMBOLS)}] Scanning {sym} …")

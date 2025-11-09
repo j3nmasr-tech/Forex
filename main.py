@@ -704,18 +704,23 @@ def analyze_symbol(symbol):
         skipped_signals += 1
         return False
 
-# BTC correlation filter
+# === BTC 1h correlation filter ===
 btc1h_bias = get_btc_1h_bias()  # fetch 1-hour BTC bias
+skip_signal = False
+
 if btc1h_bias is not None:
     if chosen_dir == "BUY" and btc1h_bias == "bear":
         dbg(f"Skipping {symbol}: BTC 1h bias is bear; skipping counter-BTC BUY.", "TRACE")
         skipped_signals += 1
-        return False
-    if chosen_dir == "SELL" and btc1h_bias == "bull":
+        skip_signal = True
+    elif chosen_dir == "SELL" and btc1h_bias == "bull":
         dbg(f"Skipping {symbol}: BTC 1h bias is bull; skipping counter-BTC SELL.", "TRACE")
         skipped_signals += 1
-        return False
-        
+        skip_signal = True
+
+# Skip this symbol if BTC bias opposes trade
+if skip_signal:
+    continue  # moves to next symbol in your scanning loop
     # Dual bias flip rule for reversal trades
     try:
         higher_tf = "4h" if chosen_tf == "1h" else ("1d" if chosen_tf == "4h" else "1d")

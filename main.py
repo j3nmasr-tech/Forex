@@ -48,9 +48,10 @@ CONF_MIN_TFS  = 2
 CONFIDENCE_MIN = 55.0
 MIN_QUOTE_VOLUME = 1_000_000.0
 
-# Only BTC and ETH
-TOP_SYMBOLS = 2
-MONITORED_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
+# ===== SYMBOLS =====
+# Only BTC and ETH for Swing Mode
+TOP_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
+MONITORED_SYMBOLS = TOP_SYMBOLS
 
 OKX_KLINES = "https://www.okx.com/api/v5/market/history-candles"
 OKX_TICKER = "https://www.okx.com/api/v5/market/ticker"

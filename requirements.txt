@@ -1,6 +1,4 @@
 requests
 pandas
 numpy
-ta
-yfinance
 python-telegram-bot==13.15

@@ -56,7 +56,7 @@ MONITORED_SYMBOLS = TOP_SYMBOLS
 OKX_KLINES = "https://www.okx.com/api/v5/market/history-candles"
 OKX_TICKER = "https://www.okx.com/api/v5/market/ticker"
 FNG_API        = "https://api.alternative.me/fng/?limit=1"
-#COINGECKO_GLOBAL = "https://api.coingecko.com/api/v3/global"
+COINGECKO_GLOBAL = "https://api.coingecko.com/api/v3/global"
 
 LOG_CSV = "./sirts_v10_swing_okx.csv"
 

@@ -1016,14 +1016,14 @@ while True:
 
         # Scan monitored symbols
         for i, sym in enumerate(MONITORED_SYMBOLS, start=1):
-    print(f"[{i}/{len(MONITORED_SYMBOLS)}] Scanning {sym} …")
-    try:
-        analyze_symbol(sym)
-    except Exception as e:
-        print(f"⚠️ Error scanning {sym}: {e}")
-    # Small pause between symbols to avoid hitting APIs too fast (helps if 2 bots run together)
-    time.sleep(2.0 + random.uniform(0, 0.6))  # 2.0–2.6 seconds pause
-
+            print(f"[{i}/{len(MONITORED_SYMBOLS)}] Scanning {sym} …")
+            try:
+                analyze_symbol(sym)
+            except Exception as e:
+                print(f"⚠️ Error scanning {sym}: {e}")
+            # Small pause between symbols to avoid hitting APIs too fast (helps if 2 bots run together)
+            time.sleep(2.0 + random.uniform(0, 0.6))  # 2.0–2.6 seconds pause
+            
         # Check open trades for TP/SL/Breakeven
         check_trades()
 

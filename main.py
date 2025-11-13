@@ -874,7 +874,7 @@ while True:
             time.sleep(1)
             continue
 
-        # BTC volatility spike check
+          # BTC volatility spike check
         try:
             if btc_volatility_spike():
                 volatility_pause_until = time.time() + VOLATILITY_PAUSE
@@ -885,8 +885,8 @@ while True:
             print("Volatility check error:", e)
 
         # Scan monitored symbols
-        for i, sym in enumerate(SYMBOLS, start=1):
-            print(f"[{i}/{len(SYMBOLS)}] Scanning {sym} …")
+        for i, sym in enumerate(MONITORED_SYMBOLS, start=1):
+            print(f"[{i}/{len(MONITORED_SYMBOLS)}] Scanning {sym} …")
             try:
                 analyze_symbol(sym)
             except Exception as e:
@@ -901,7 +901,7 @@ while True:
         if now - last_heartbeat > 43200:
             heartbeat()
             last_heartbeat = now
-
+            
         # Daily summary every 24 hours
         if now - last_summary > 86400:
             summary()

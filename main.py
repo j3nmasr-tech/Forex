@@ -635,12 +635,12 @@ def analyze_symbol(symbol):
         skipped_signals += 1
         return False
 
-    # ===== dominance filter for ALL symbols =====
-    if btc_dom is not None and btc_dom > BTC_DOMINANCE_MAX:
-        print(f"Skipping {symbol}: BTC dominance {btc_dom:.2f}% > {BTC_DOMINANCE_MAX}%")
-        skipped_signals += 1
-        return False
-
+    # ===== Dominance filter (ALTS ONLY) =====
+    if symbol not in ("BTCUSDT", "ETHUSDT"):
+        if btc_dom is None or btc_dom > BTC_DOMINANCE_MAX:
+            print(f"Skipping {symbol}: BTC dominance {btc_dom:.2f}% > {BTC_DOMINANCE_MAX}%")
+            skipped_signals += 1
+            return False
     # ===== Continue to your SMC/TF logic =====
     # (your existing code continues here...)
     

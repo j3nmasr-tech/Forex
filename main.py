@@ -44,9 +44,9 @@ WEIGHT_TURTLE = 0.25
 WEIGHT_CRT    = 0.20
 WEIGHT_VOLUME = 0.15
 
-MIN_TF_SCORE  = 55
+MIN_TF_SCORE  = 50
 CONF_MIN_TFS  = 1
-CONFIDENCE_MIN = 60.0
+CONFIDENCE_MIN = 55.0
 MIN_QUOTE_VOLUME = 50_000.0
 
 # ============================================================
@@ -106,7 +106,7 @@ COINGECKO_GLOBAL = "https://api.coingecko.com/api/v3/global"
 LOG_CSV = "./sirts_v10_swing_okx.csv"
 
 # Market filters & risk
-BTC_DOMINANCE_MAX = 55.0
+BTC_DOMINANCE_MAX = 58.0
 BTC_RISK_MULT_BULL  = 1.00
 BTC_RISK_MULT_BEAR  = 0.70
 BTC_RISK_MULT_MIXED = 0.85

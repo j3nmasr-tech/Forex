@@ -19,29 +19,26 @@ import random
 try:
     sys.stdout.reconfigure(line_buffering=True)
 except Exception:
-    # older Python may not have reconfigure; fallback to flush on prints
     pass
 
 print("🔧 SIRTS v10 — Part 1 loaded")
 
 # ===== CONFIG (tweak these) =====
-BOT_TOKEN = os.getenv("BOT_TOKEN")      # Telegram bot token
-CHAT_ID   = os.getenv("CHAT_ID")        # Telegram chat id (int)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID   = os.getenv("CHAT_ID")
 
-CAPITAL = 80.0
+CAPITAL = 60.0
 LEVERAGE = 30
 COOLDOWN_TIME_DEFAULT = 1800
 COOLDOWN_TIME_SUCCESS = 15 * 60
 COOLDOWN_TIME_FAIL    = 45 * 60
 
-# Swing TFs
 TIMEFRAMES = ["1h", "4h", "1d"]
 VOLATILITY_THRESHOLD_PCT = 2.5
 VOLATILITY_PAUSE = 1800
-CHECK_INTERVAL = 900   # seconds between full scans
-API_CALL_DELAY = 0.1  # small delay between calls to avoid rate limits
+CHECK_INTERVAL = 900
+API_CALL_DELAY = 0.1
 
-# Weights
 WEIGHT_BIAS   = 0.40
 WEIGHT_TURTLE = 0.25
 WEIGHT_CRT    = 0.20
@@ -52,16 +49,50 @@ CONF_MIN_TFS  = 1
 CONFIDENCE_MIN = 60.0
 MIN_QUOTE_VOLUME = 50_000.0
 
-# ===== SYMBOL LIST (TOP 30 + BTC & ETH priority) =====
+# ============================================================
+# ✅ GET TOP SYMBOLS BY 24H QUOTE VOLUME (OKX)
+# ============================================================
+def get_top_symbols_by_volume(limit=30):
+    """Return top-N USDT SWAP symbols sorted by 24h quote volume (OKX)."""
+    url = "https://www.okx.com/api/v5/market/tickers?instType=SWAP"
 
-# These are your mandatory core symbols (BTC & ETH always included)
+    try:
+        r = requests.get(url, timeout=5)
+        data = r.json()
+
+        if data.get("code") != "0":
+            print("⚠️ OKX tickers error:", data)
+            return []
+
+        tickers = data.get("data", [])
+        usdt_perps = []
+
+        for t in tickers:
+            inst = t.get("instId", "")
+            if not inst.endswith("-USDT-SWAP"):
+                continue
+
+            vol = float(t.get("volCcy24h", 0))
+            symbol = inst.replace("-USDT-SWAP", "USDT")
+            usdt_perps.append((symbol, vol))
+
+        usdt_perps.sort(key=lambda x: x[1], reverse=True)
+
+        return [s for s, _ in usdt_perps[:limit]]
+
+    except Exception as e:
+        print("⚠️ get_top_symbols_by_volume error:", e)
+        return []
+
+
+# ============================================================
+# ⭐ SYMBOL LIST (CORE + TOP 30)
+# ============================================================
 CORE_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
 
-# Automatically fetch top 30 by volume
 TOP_LIMIT = 30
-top_symbols = get_top_symbols_by_volume(TOP_LIMIT)  # you already have this function
+top_symbols = get_top_symbols_by_volume(TOP_LIMIT)
 
-# Merge: core symbols + top 30 (removing duplicates)
 MONITORED_SYMBOLS = list(dict.fromkeys(CORE_SYMBOLS + top_symbols))
 
 print("Monitoring symbols:", MONITORED_SYMBOLS)
@@ -89,12 +120,11 @@ MIN_SL_DISTANCE_PCT = 0.0015
 SYMBOL_BLACKLIST = set([])
 RECENT_SIGNAL_SIGNATURE_EXPIRE = 300
 
-# Risk settings
 BASE_RISK = 0.02
 MAX_RISK  = 0.06
 MIN_RISK  = 0.01
 
-# ===== STATE (runtime) =====
+# ===== STATE =====
 last_trade_time      = {}
 open_trades          = []
 signals_sent_total   = 0
@@ -115,10 +145,8 @@ STATS = {
     "by_tf": {tf: {"sent":0,"hit":0,"fail":0,"breakeven":0} for tf in TIMEFRAMES}
 }
 
-# ===== SAFE HTTP helpers =====
-# A small wrapper that always returns JSON or None and prints errors (never blocks forever).
+# ===== SAFE HTTP wrapper =====
 def safe_get_json(url, params=None, timeout=8, retries=2, backoff=0.6):
-    """GET request returning parsed JSON or None. Handles 429/backoff and network errors."""
     for attempt in range(1, retries + 2):
         try:
             r = requests.get(url, params=params, timeout=timeout)
@@ -128,19 +156,12 @@ def safe_get_json(url, params=None, timeout=8, retries=2, backoff=0.6):
                 time.sleep(wait)
                 continue
             r.raise_for_status()
-            try:
-                return r.json()
-            except ValueError:
-                print(f"⚠️ Non-JSON response from {url}")
-                return None
-        except requests.exceptions.RequestException as e:
-            print(f"⚠️ HTTP error for {url} params={params} attempt {attempt}: {e}")
+            return r.json()
+        except Exception as e:
+            print(f"⚠️ HTTP error for {url} params={params}: {e}")
             if attempt <= retries:
                 time.sleep(backoff * attempt)
-                continue
-            return None
     return None
-
 # Convenience wrapper for POST (Telegram)
 def safe_post(url, data=None, timeout=8):
     try:

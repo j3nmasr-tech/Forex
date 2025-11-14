@@ -319,9 +319,61 @@ def get_fear_greed_value():
 
 def sentiment_label():
     v = get_fear_greed_value()
-    if v < 25: return "fear"
-    if v > 75: return "greed"
+    if v < 25:
+        return "fear"
+    if v > 75:
+        return "greed"
     return "neutral"
+
+
+# ===== GET TOP SYMBOLS BY 24H QUOTE VOLUME (OKX) =====
+def get_top_symbols_by_volume(limit=30):
+    """
+    Returns top-N USDT perpetual symbols sorted by 24h quote volume (highest first).
+    OKX endpoint: /api/v5/market/tickers?instType=SWAP
+    """
+    url = "https://www.okx.com/api/v5/market/tickers?instType=SWAP"
+
+    try:
+        r = requests.get(url, timeout=5)
+        data = r.json()
+
+        if data.get("code") != "0":
+            print("⚠️ OKX tickers error:", data)
+            return []
+
+        tickers = data.get("data", [])
+        usdt_perps = []
+
+        for t in tickers:
+            inst = t.get("instId", "")
+            if not inst.endswith("-USDT-SWAP"):
+                continue
+
+            vol = float(t.get("volCcy24h", 0))
+            symbol = inst.replace("-USDT-SWAP", "USDT")
+            usdt_perps.append((symbol, vol))
+
+        # sort by descending volume
+        usdt_perps.sort(key=lambda x: x[1], reverse=True)
+
+        return [s for s, _ in usdt_perps[:limit]]
+
+    except Exception as e:
+        print("⚠️ get_top_symbols_by_volume error:", e)
+        return []
+
+
+# ===== SYMBOL LIST (TOP 30 + BTC & ETH priority) =====
+CORE_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
+
+TOP_LIMIT = 30
+top_symbols = get_top_symbols_by_volume(TOP_LIMIT)
+
+# Merge core + top-30 (remove duplicates while keeping order)
+MONITORED_SYMBOLS = list(dict.fromkeys(CORE_SYMBOLS + top_symbols))
+
+print("Monitoring symbols:", MONITORED_SYMBOLS)
 
 # ===== CSV logging (safe) =====
 def init_csv(log_path=LOG_CSV):

@@ -94,17 +94,20 @@ def get_top_symbols_by_volume(limit=30, min_volume=20_000_000):
         return []
 
 # ============================================================
-# ⭐ SYMBOL LIST (CORE + TOP 30 FILTERED)
+# ⭐ FIXED: STRICT TOP-TIER WHITELIST (no meme coins ever)
 # ============================================================
-CORE_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
 
-TOP_LIMIT = 30
-MIN_QUOTE_VOLUME = 20_000_000  # Top-tier assets only
+CORE_SYMBOLS = [
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+    "DOGEUSDT", "TONUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT",
+    "LINKUSDT", "TRXUSDT", "MATICUSDT", "NEARUSDT", "ATOMUSDT",
+    "LTCUSDT", "ICPUSDT", "APTUSDT", "SUIUSDT", "INJUSDT",
+    "OPUSDT", "ARBUSDT", "AAVEUSDT", "UNIUSDT", "FTMUSDT",
+    "RNDRUSDT", "EGLDUSDT", "ETCUSDT", "KASUSDT", "JUPUSDT"
+]
 
-top_symbols = get_top_symbols_by_volume(TOP_LIMIT, MIN_QUOTE_VOLUME)
-
-# Combine core + top-tier list (remove duplicates)
-MONITORED_SYMBOLS = list(dict.fromkeys(CORE_SYMBOLS + top_symbols))
+# No more volume-based filtering — whitelist only
+MONITORED_SYMBOLS = CORE_SYMBOLS.copy()
 
 print("Monitoring symbols:", MONITORED_SYMBOLS)
 
@@ -395,17 +398,6 @@ def get_top_symbols_by_volume(limit=30):
         print("⚠️ get_top_symbols_by_volume error:", e)
         return []
 
-
-# ===== SYMBOL LIST (TOP 30 + BTC & ETH priority) =====
-CORE_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
-
-TOP_LIMIT = 30
-top_symbols = get_top_symbols_by_volume(TOP_LIMIT)
-
-# Merge core + top-30 (remove duplicates while keeping order)
-MONITORED_SYMBOLS = list(dict.fromkeys(CORE_SYMBOLS + top_symbols))
-
-print("Monitoring symbols:", MONITORED_SYMBOLS)
 
 # ===== CSV logging (safe) =====
 def init_csv(log_path=LOG_CSV):

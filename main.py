@@ -47,7 +47,7 @@ WEIGHT_VOLUME = 0.15
 MIN_TF_SCORE  = 50
 CONF_MIN_TFS  = 1
 CONFIDENCE_MIN = 55.0
-MIN_QUOTE_VOLUME = 50_000.0
+MIN_QUOTE_VOLUME = 5_000_000
 
 # ============================================================
 # ✅ GET TOP SYMBOLS BY 24H QUOTE VOLUME (OKX)

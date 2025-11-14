@@ -50,11 +50,21 @@ WEIGHT_VOLUME = 0.15
 MIN_TF_SCORE  = 55
 CONF_MIN_TFS  = 1
 CONFIDENCE_MIN = 60.0
-MIN_QUOTE_VOLUME = 700_000.0
+MIN_QUOTE_VOLUME = 50_000.0
 
-# Symbols (BTC + ETH only for swing)
-TOP_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
-MONITORED_SYMBOLS = TOP_SYMBOLS.copy()
+# ===== SYMBOL LIST (TOP 30 + BTC & ETH priority) =====
+
+# These are your mandatory core symbols (BTC & ETH always included)
+CORE_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
+
+# Automatically fetch top 30 by volume
+TOP_LIMIT = 30
+top_symbols = get_top_symbols_by_volume(TOP_LIMIT)  # you already have this function
+
+# Merge: core symbols + top 30 (removing duplicates)
+MONITORED_SYMBOLS = list(dict.fromkeys(CORE_SYMBOLS + top_symbols))
+
+print("Monitoring symbols:", MONITORED_SYMBOLS)
 
 # API endpoints
 OKX_KLINES = "https://www.okx.com/api/v5/market/history-candles"
@@ -601,14 +611,14 @@ def analyze_symbol(symbol):
     vol24 = get_24h_quote_volume(symbol)
 
     # BTC & ETH bypass volume requirement completely
-    if symbol in ["BTCUSDT", "ETHUSDT"]:
+    if symbol in ("BTCUSDT", "ETHUSDT"):
         print(f"Bypassing volume filter for {symbol}: vol24={vol24}")
     else:
-        if vol24 < MIN_QUOTE_VOLUME:
+        if vol24 is None or vol24 < MIN_QUOTE_VOLUME:
             print(f"Skipping {symbol}: low quote volume {vol24}")
             skipped_signals += 1
             return False
-
+            
     # ===== cooldown per symbol (BTC, ETH, ALTS) =====
     if last_trade_time.get(symbol, 0) > now:
         print(f"Cooldown active for {symbol}, skipping until {datetime.fromtimestamp(last_trade_time.get(symbol))}")
@@ -618,8 +628,10 @@ def analyze_symbol(symbol):
     # ===== BTC MARKET STATE (safe, non-blocking) =====
     btc_dir = btc_direction_4h()
     print("  BTC direction:", btc_dir)
+
     btc_dom = get_btc_dominance()
     print("  BTC dominance:", btc_dom)
+
     btc_adx = btc_adx_4h_ok()
     print("  BTC 4H ADX:", btc_adx)
 
@@ -629,20 +641,21 @@ def analyze_symbol(symbol):
         skipped_signals += 1
         return False
 
-    # ===== ADX filter for ALL symbols =====
+    # ===== ADX filter for ALL symbols (BTC, ETH, ALTS) =====
     if btc_adx is None or btc_adx < BTC_ADX_MIN:
         print(f"Skipping {symbol}: BTC ADX {btc_adx} too low.")
         skipped_signals += 1
         return False
 
-    # ===== Dominance filter (ALTS ONLY) =====
+    # ===== Dominance filter (ALTS ONLY — NOT BTC/ETH) =====
     if symbol not in ("BTCUSDT", "ETHUSDT"):
         if btc_dom is None or btc_dom > BTC_DOMINANCE_MAX:
             print(f"Skipping {symbol}: BTC dominance {btc_dom:.2f}% > {BTC_DOMINANCE_MAX}%")
             skipped_signals += 1
             return False
+
     # ===== Continue to your SMC/TF logic =====
-    # (your existing code continues here...)
+    # (rest of your code here...)
     
     # Set btc risk multiplier by direction
     if btc_dir == "BULL":

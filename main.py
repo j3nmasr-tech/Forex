@@ -50,10 +50,13 @@ CONFIDENCE_MIN = 55.0
 MIN_QUOTE_VOLUME = 5_000_000
 
 # ============================================================
-# ✅ GET TOP SYMBOLS BY 24H QUOTE VOLUME (OKX)
+# ✅ GET TOP SYMBOLS BY 24H QUOTE VOLUME (OKX) — TOP-TIER ONLY
 # ============================================================
-def get_top_symbols_by_volume(limit=30):
-    """Return top-N USDT SWAP symbols sorted by 24h quote volume (OKX)."""
+def get_top_symbols_by_volume(limit=30, min_volume=20_000_000):
+    """
+    Return top-N USDT SWAP symbols sorted by 24h quote volume.
+    Filters out low-cap / meme coins (requires 20M+ quote volume).
+    """
     url = "https://www.okx.com/api/v5/market/tickers?instType=SWAP"
 
     try:
@@ -73,9 +76,15 @@ def get_top_symbols_by_volume(limit=30):
                 continue
 
             vol = float(t.get("volCcy24h", 0))
+
+            # 🔥 FILTER: 20M+ volume = top-tier assets only
+            if vol < min_volume:
+                continue
+
             symbol = inst.replace("-USDT-SWAP", "USDT")
             usdt_perps.append((symbol, vol))
 
+        # sort by volume descending
         usdt_perps.sort(key=lambda x: x[1], reverse=True)
 
         return [s for s, _ in usdt_perps[:limit]]
@@ -84,15 +93,17 @@ def get_top_symbols_by_volume(limit=30):
         print("⚠️ get_top_symbols_by_volume error:", e)
         return []
 
-
 # ============================================================
-# ⭐ SYMBOL LIST (CORE + TOP 30)
+# ⭐ SYMBOL LIST (CORE + TOP 30 FILTERED)
 # ============================================================
 CORE_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
 
 TOP_LIMIT = 30
-top_symbols = get_top_symbols_by_volume(TOP_LIMIT)
+MIN_QUOTE_VOLUME = 20_000_000  # Top-tier assets only
 
+top_symbols = get_top_symbols_by_volume(TOP_LIMIT, MIN_QUOTE_VOLUME)
+
+# Combine core + top-tier list (remove duplicates)
 MONITORED_SYMBOLS = list(dict.fromkeys(CORE_SYMBOLS + top_symbols))
 
 print("Monitoring symbols:", MONITORED_SYMBOLS)

@@ -642,95 +642,95 @@ def analyze_symbol(symbol):
     else:
         btc_risk_mult = BTC_RISK_MULT_MIXED
 
-# ===== STRICT MULTI-TF AGREEMENT (Swing Mode) =====
-tf_confirmations = 0
-chosen_dir      = None
-chosen_entry    = None
-chosen_tf       = None
-breakdown_per_tf = {}
-per_tf_scores = []
+    # ===== STRICT MULTI-TF AGREEMENT (Swing Mode) =====
+    tf_confirmations = 0
+    chosen_dir      = None
+    chosen_entry    = None
+    chosen_tf       = None
+    breakdown_per_tf = {}
+    per_tf_scores = []
 
-# get all klines first so we can compare directions
-tf_data = {}
-for tf in TIMEFRAMES:
-    df = get_klines(symbol, tf)
-    if df is None or len(df) < 60:
-        tf_data[tf] = None
-    else:
-        tf_data[tf] = df
+    # get all klines first so we can compare directions
+    tf_data = {}
+    for tf in TIMEFRAMES:
+        df = get_klines(symbol, tf)
+        if df is None or len(df) < 60:
+            tf_data[tf] = None
+        else:
+            tf_data[tf] = df
 
-# strict agreement: all timeframes must point same direction
-directions = {}
+    # strict agreement: all timeframes must point same direction
+    directions = {}
 
-for tf, df in tf_data.items():
-    if df is None:
-        directions[tf] = None
-        continue
+    for tf, df in tf_data.items():
+        if df is None:
+            directions[tf] = None
+            continue
 
-    crt_b, crt_s = detect_crt(df)
-    ts_b, ts_s = detect_turtle(df)
-    bias = smc_bias(df)
-    vol_ok = volume_ok(df)
+        crt_b, crt_s = detect_crt(df)
+        ts_b, ts_s = detect_turtle(df)
+        bias = smc_bias(df)
+        vol_ok = volume_ok(df)
 
-    bull_score = (
-        WEIGHT_CRT*(1 if crt_b else 0) +
-        WEIGHT_TURTLE*(1 if ts_b else 0) +
-        WEIGHT_VOLUME*(1 if vol_ok else 0) +
-        WEIGHT_BIAS*(1 if bias=="bull" else 0)
-    ) * 100
+        bull_score = (
+            WEIGHT_CRT*(1 if crt_b else 0) +
+            WEIGHT_TURTLE*(1 if ts_b else 0) +
+            WEIGHT_VOLUME*(1 if vol_ok else 0) +
+            WEIGHT_BIAS*(1 if bias=="bull" else 0)
+        ) * 100
 
-    bear_score = (
-        WEIGHT_CRT*(1 if crt_s else 0) +
-        WEIGHT_TURTLE*(1 if ts_s else 0) +
-        WEIGHT_VOLUME*(1 if vol_ok else 0) +
-        WEIGHT_BIAS*(1 if bias=="bear" else 0)
-    ) * 100
+        bear_score = (
+            WEIGHT_CRT*(1 if crt_s else 0) +
+            WEIGHT_TURTLE*(1 if ts_s else 0) +
+            WEIGHT_VOLUME*(1 if vol_ok else 0) +
+            WEIGHT_BIAS*(1 if bias=="bear" else 0)
+        ) * 100
 
-    breakdown_per_tf[tf] = {
-        "bull_score": int(bull_score),
-        "bear_score": int(bear_score),
-        "bias": bias,
-        "vol_ok": vol_ok,
-        "crt_b": bool(crt_b),
-        "crt_s": bool(crt_s),
-        "ts_b": bool(ts_b),
-        "ts_s": bool(ts_s)
-    }
+        breakdown_per_tf[tf] = {
+            "bull_score": int(bull_score),
+            "bear_score": int(bear_score),
+            "bias": bias,
+            "vol_ok": vol_ok,
+            "crt_b": bool(crt_b),
+            "crt_s": bool(crt_s),
+            "ts_b": bool(ts_b),
+            "ts_s": bool(ts_s)
+        }
 
-    per_tf_scores.append(max(bull_score, bear_score))
+        per_tf_scores.append(max(bull_score, bear_score))
 
-    # determine direction for this TF
-    if bull_score >= MIN_TF_SCORE:
-        directions[tf] = "BUY"
-    elif bear_score >= MIN_TF_SCORE:
-        directions[tf] = "SELL"
-    else:
-        directions[tf] = None
+        # determine direction for this TF
+        if bull_score >= MIN_TF_SCORE:
+            directions[tf] = "BUY"
+        elif bear_score >= MIN_TF_SCORE:
+            directions[tf] = "SELL"
+        else:
+            directions[tf] = None
 
-# -------- strict check: all TF must match --------
-unique_dirs = set(directions.values()) - {None}
+    # -------- strict check: all TF must match --------
+    unique_dirs = set(directions.values()) - {None}
 
-if len(unique_dirs) != 1:
-    print(f"{symbol}: strict TF disagreement → SKIPPED")
-    skipped_signals += 1
-    return False
+    if len(unique_dirs) != 1:
+        print(f"{symbol}: strict TF disagreement → SKIPPED")
+        skipped_signals += 1
+        return False
 
-# only one direction remains
-chosen_dir = unique_dirs.pop()
+    # only one direction remains
+    chosen_dir = unique_dirs.pop()
 
-# pick entry from highest TF for stability
-highest_tf = TIMEFRAMES[-1]
-chosen_entry = float(tf_data[highest_tf]["close"].iloc[-1])
-chosen_tf = highest_tf
+    # pick entry from highest TF for stability
+    highest_tf = TIMEFRAMES[-1]
+    chosen_entry = float(tf_data[highest_tf]["close"].iloc[-1])
+    chosen_tf = highest_tf
 
-print(f"  STRICT TF AGREEMENT → {chosen_dir} @ {chosen_entry}")
+    print(f"  STRICT TF AGREEMENT → {chosen_dir} @ {chosen_entry}")
 
-# compute confidence
-confidence_pct = float(np.mean(per_tf_scores)) if per_tf_scores else 100.0
-confidence_pct = max(0.0, min(100.0, confidence_pct))
+    # compute confidence
+    confidence_pct = float(np.mean(per_tf_scores)) if per_tf_scores else 100.0
+    confidence_pct = max(0.0, min(100.0, confidence_pct))
 
     # safety fallback: require confidence threshold
-    if confidence_pct < CONFIDENCE_MIN or tf_confirmations < CONF_MIN_TFS:
+    if confidence_pct < CONFIDENCE_MIN:
         print(f"Skipping {symbol}: confidence {confidence_pct:.1f}% < {CONFIDENCE_MIN}%")
         skipped_signals += 1
         return False
@@ -747,6 +747,7 @@ confidence_pct = max(0.0, min(100.0, confidence_pct))
         print(f"Skipping {symbol}: duplicate recent signal {sig}")
         skipped_signals += 1
         return False
+
     recent_signals[sig] = time.time()
 
     # sentiment & entry price

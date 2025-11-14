@@ -507,28 +507,38 @@ def get_atr(symbol, period=14):
         return None
     return max(float(np.mean(trs)), 1e-8)
 
-def trade_params(symbol, entry, side, atr_multiplier_sl=1.7, tp_mults=(1.8,2.8,3.8), conf_multiplier=1.0):
+def trade_params(symbol, entry, side,
+                 atr_multiplier_sl=1.7,
+                 tp_mults=(1.8, 2.8, 3.8),
+                 conf_multiplier=1.0):
     """
-    Compute SL and 3 TP levels based on ATR and confidence multiplier.
-    Returns (sl, tp1, tp2, tp3) or None.
+    Compute SL and 3 TP levels using ATR and confidence multiplier.
+    Swing version: ATR capped at 12% of price, floor at 0.05%.
     """
     atr = get_atr(symbol)
     if atr is None:
         return None
-    atr = max(min(atr, entry * 0.05), entry * 0.0001)
+
+    # Swing ATR range: 0.05% → 12%
+    atr = max(min(atr, entry * 0.12), entry * 0.0005)
+
+    # SL widens when confidence is lower
     adj_sl_multiplier = atr_multiplier_sl * (1.0 + (0.5 - conf_multiplier) * 0.5)
+
     try:
         if side == "BUY":
             sl  = round(entry - atr * adj_sl_multiplier, 8)
             tp1 = round(entry + atr * tp_mults[0] * conf_multiplier, 8)
             tp2 = round(entry + atr * tp_mults[1] * conf_multiplier, 8)
             tp3 = round(entry + atr * tp_mults[2] * conf_multiplier, 8)
-        else:
+        else:  # SELL
             sl  = round(entry + atr * adj_sl_multiplier, 8)
             tp1 = round(entry - atr * tp_mults[0] * conf_multiplier, 8)
             tp2 = round(entry - atr * tp_mults[1] * conf_multiplier, 8)
             tp3 = round(entry - atr * tp_mults[2] * conf_multiplier, 8)
+
         return sl, tp1, tp2, tp3
+
     except Exception as e:
         print("trade_params error:", e)
         return None
@@ -758,21 +768,28 @@ def analyze_symbol(symbol):
         skipped_signals += 1
         return False
 
-    # derive TP/SL
-    conf_multiplier = max(0.5, min(1.3, confidence_pct / 100.0 + 0.5))
+    # ===== TP/SL FOR SWING MODE ONLY =====
+    # swing trades need wider stop & TP ranges
+    conf_multiplier = max(0.8, min(1.8, confidence_pct / 100.0 + 0.8))
+
+    # compute TP/SL
     tp_sl = trade_params(symbol, entry, chosen_dir, conf_multiplier=conf_multiplier)
     if not tp_sl:
         print(f"Skipping {symbol}: failed to compute tp/sl")
         skipped_signals += 1
         return False
+
     sl, tp1, tp2, tp3 = tp_sl
 
     # position sizing
-    units, margin, exposure, risk_used = pos_size_units(entry, sl, confidence_pct, btc_risk_multiplier=btc_risk_mult)
+    units, margin, exposure, risk_used = pos_size_units(
+        entry, sl, confidence_pct, btc_risk_multiplier=btc_risk_mult
+    )
     if units <= 0 or margin <= 0 or exposure <= 0:
         print(f"Skipping {symbol}: invalid sizing units={units} margin={margin}")
         skipped_signals += 1
         return False
+
     if exposure > CAPITAL * MAX_EXPOSURE_PCT:
         print(f"Skipping {symbol}: exposure {exposure} > max allowed")
         skipped_signals += 1

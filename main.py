@@ -583,7 +583,6 @@ def analyze_symbol(symbol):
     if not symbol or not isinstance(symbol, str):
         skipped_signals += 1
         return False
-
     if symbol in SYMBOL_BLACKLIST:
         skipped_signals += 1
         return False
@@ -600,7 +599,7 @@ def analyze_symbol(symbol):
             skipped_signals += 1
             return False
 
-    # ===== cooldown per symbol (ALWAYS applies to BTC, ETH, and ALTS) =====
+    # ===== cooldown per symbol (BTC, ETH, ALTS) =====
     if last_trade_time.get(symbol, 0) > now:
         print(f"Cooldown active for {symbol}, skipping until {datetime.fromtimestamp(last_trade_time.get(symbol))}")
         skipped_signals += 1
@@ -614,25 +613,27 @@ def analyze_symbol(symbol):
     btc_adx = btc_adx_4h_ok()
     print("  BTC 4H ADX:", btc_adx)
 
-    # ===== BTC direction check (BTC ONLY) =====
-    if symbol == "BTCUSDT":
-        if btc_dir is None:
-            print("Skipping BTCUSDT: BTC direction unavailable.")
-            skipped_signals += 1
-            return False
+    # ===== BTC direction must exist for ALL symbols =====
+    if btc_dir is None:
+        print(f"Skipping {symbol}: BTC direction unavailable.")
+        skipped_signals += 1
+        return False
 
-    # ===== ADX & dominance filters (ALTS ONLY — ETH & BTC bypass) =====
-    if symbol not in ["BTCUSDT", "ETHUSDT"]:
-        if btc_adx is None or btc_adx < BTC_ADX_MIN:
-            print(f"Skipping {symbol}: BTC ADX {btc_adx} too low (alts suppressed).")
-            skipped_signals += 1
-            return False
+    # ===== ADX filter for ALL symbols =====
+    if btc_adx is None or btc_adx < BTC_ADX_MIN:
+        print(f"Skipping {symbol}: BTC ADX {btc_adx} too low.")
+        skipped_signals += 1
+        return False
 
-        if btc_dom is not None and btc_dom > BTC_DOMINANCE_MAX:
-            print(f"Skipping {symbol}: BTC dominance {btc_dom:.2f}% > {BTC_DOMINANCE_MAX}% (alts suppressed).")
-            skipped_signals += 1
-            return False
+    # ===== dominance filter for ALL symbols =====
+    if btc_dom is not None and btc_dom > BTC_DOMINANCE_MAX:
+        print(f"Skipping {symbol}: BTC dominance {btc_dom:.2f}% > {BTC_DOMINANCE_MAX}%")
+        skipped_signals += 1
+        return False
 
+    # ===== Continue to your SMC/TF logic =====
+    # (your existing code continues here...)
+    
     # Set btc risk multiplier by direction
     if btc_dir == "BULL":
         btc_risk_mult = BTC_RISK_MULT_BULL

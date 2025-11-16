@@ -327,32 +327,52 @@ def analyze_symbol(symbol, btc_ok=None, btc_dir=None):
     last_trade_time[symbol] = now + COOLDOWN_TIME_DEFAULT
     return True
 
-# ===== MAIN LOOP =====
+# ===== MAIN LOOP WITH DEBUG =====
 init_csv()
 send_message("✅ SIRTS Swing Bot Signal-Only deployed on OKX.")
 
 # Fetch dynamic top USDT swap symbols
 SYMBOLS = get_okx_swaps(TOP_SYMBOLS)
-print("Trading symbols:", SYMBOLS)
+print("[DEBUG] Trading symbols fetched:", SYMBOLS)
 
-CYCLE_DELAY = 900  # 15 minutes
+CYCLE_DELAY = 900  # 15 minutes (reduce to 5-10 sec for testing)
+API_CALL_DELAY = 0.2  # can reduce for testing
 
 while True:
     cycle_start = datetime.now(timezone.utc)
-    print(f"\n=== Starting new cycle at {cycle_start.strftime('%H:%M:%S UTC')} ===")
-
-    # Fetch BTC trend once per cycle
-    btc_ok, btc_dir, btc_sma = btc_trend_agree()
-    print(f"[BTC] Trend check → OK: {btc_ok}, Dir: {btc_dir}, SMA trend: {btc_sma}")
+    print(f"[DEBUG] Starting new cycle at {cycle_start.strftime('%H:%M:%S UTC')}")
 
     for sym in SYMBOLS:
+        print(f"[DEBUG] >>> Processing symbol: {sym}")
         try:
-            result = analyze_symbol(sym, btc_ok=btc_ok, btc_dir=btc_dir)
+            # Step 1: fetch 24h quote volume
+            vol24 = get_24h_quote_volume(sym)
+            print(f"[DEBUG] {sym} 24h quote volume: {vol24}")
+
+            if vol24 < MIN_QUOTE_VOLUME:
+                print(f"[DEBUG] {sym} skipped: below min quote volume")
+                status = "❌ skipped volume"
+                continue
+
+            # Step 2: fetch klines for each timeframe
+            for tf in TIMEFRAMES:
+                print(f"[DEBUG] Fetching {tf} klines for {sym}")
+                df = get_klines(sym, tf)
+                if df is None or len(df) < 10:
+                    print(f"[DEBUG] {sym} {tf} klines insufficient")
+                else:
+                    print(f"[DEBUG] {sym} {tf} klines fetched, last close: {df['close'].iloc[-1]}")
+
+            # Step 3: analyze symbol
+            result = analyze_symbol(sym)
             status = "✅ signal sent" if result else "❌ no signal"
+
         except Exception as e:
             status = f"⚠ Error: {e}"
-        print(f"[{sym}] Scan result → {status}")
+        print(f"[DEBUG] {sym} scanned at {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')} → {status}")
+
+        # Rate-limit delay
         time.sleep(API_CALL_DELAY)
 
-    print(f"=== Cycle completed at {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')} ===\n")
+    print(f"[DEBUG] Cycle completed at {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}\n")
     time.sleep(CYCLE_DELAY)

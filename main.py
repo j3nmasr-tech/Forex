@@ -4,14 +4,14 @@
 # Environment variables: BOT_TOKEN, CHAT_ID
 
 import os, re, time, requests, pandas as pd, numpy as np, csv
-from datetime import datetime
+from datetime import datetime, timezone
 
 # ===== CONFIG =====
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID   = os.getenv("CHAT_ID")
 
 CAPITAL = 100.0
-LEVERAGE = 5  # swing trades → lower leverage
+LEVERAGE = 5
 
 COOLDOWN_TIME_DEFAULT = 7200       # 2h
 COOLDOWN_TIME_SUCCESS = 3600       # 1h
@@ -21,7 +21,7 @@ VOLATILITY_THRESHOLD_PCT = 3.0
 VOLATILITY_PAUSE = 3600
 API_CALL_DELAY = 0.2  # rate-limit safety
 
-TIMEFRAMES = ["4H", "1D", "1W"]  # swing TFs
+TIMEFRAMES = ["4H", "1D", "1W"]
 WEIGHT_BIAS   = 0.40
 WEIGHT_TURTLE = 0.25
 WEIGHT_CRT    = 0.20
@@ -31,19 +31,18 @@ MIN_TF_SCORE  = 55
 CONF_MIN_TFS  = 2
 CONFIDENCE_MIN = 60.0
 
-MIN_QUOTE_VOLUME = 5000000  # $5M 24h minimum
+MIN_QUOTE_VOLUME = 5000000
 TOP_SYMBOLS = 80
 
 OKX_KLINES   = "https://www.okx.com/api/v5/market/candles"
 OKX_TICKERS  = "https://www.okx.com/api/v5/market/tickers"
-COINGECKO_GLOBAL = "https://api.coingecko.com/api/v3/global"
 
 LOG_CSV = "./sirts_swing_signals_okx.csv"
 
 MAX_OPEN_TRADES = 5
 MAX_EXPOSURE_PCT = 0.25
 MIN_MARGIN_USD = 1.0
-MIN_SL_DISTANCE_PCT = 0.005  # larger for swings
+MIN_SL_DISTANCE_PCT = 0.005
 
 RECENT_SIGNAL_SIGNATURE_EXPIRE = 3600
 recent_signals = {}
@@ -109,7 +108,7 @@ def get_klines(symbol, interval="4H", limit=60):
     if not data: 
         return None
     df = pd.DataFrame(data)
-    df = df.iloc[:,0:6]  # timestamp, open, high, low, close, volume
+    df = df.iloc[:,0:6]
     df.columns = ["ts","open","high","low","close","volume"]
     for col in ["open","high","low","close","volume"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -292,7 +291,7 @@ def analyze_symbol(symbol):
     if units<=0 or exposure>CAPITAL*MAX_EXPOSURE_PCT: return False
 
     send_message(f"✅ {chosen_dir} {symbol}\nEntry: {chosen_entry}\nTP1:{tp1} TP2:{tp2} TP3:{tp3}\nSL:{sl}\nUnits:{units} Margin:${margin} Exposure:${exposure}\nConf:{confidence_pct:.1f}% TFs:{', '.join(confirming_tfs)}")
-    log_signal([datetime.utcnow().isoformat(),symbol,chosen_dir,chosen_entry,tp1,tp2,tp3,sl,','.join(confirming_tfs),units,margin,exposure,risk_used,confidence_pct,"open"])
+    log_signal([datetime.now(timezone.utc).isoformat(),symbol,chosen_dir,chosen_entry,tp1,tp2,tp3,sl,','.join(confirming_tfs),units,margin,exposure,risk_used,confidence_pct,"open"])
     open_trades.append({"symbol":symbol,"side":chosen_dir,"entry":chosen_entry,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sl":sl,"units":units,"margin":margin,"exposure":exposure,"confidence_pct":confidence_pct,"status":"open"})
     recent_signals[symbol]=now
     last_trade_time[symbol]=now+COOLDOWN_TIME_DEFAULT
@@ -301,12 +300,15 @@ def analyze_symbol(symbol):
 # ===== MAIN LOOP =====
 init_csv()
 send_message("✅ SIRTS Swing Bot Signal-Only deployed on OKX.")
-SYMBOLS = ["BTC","ETH","XRP","LTC"]  # Replace with top 80 symbols dynamically if needed
 
-CYCLE_DELAY = 900  # 15 minutes between full cycles
+# Fetch dynamic top USDT swap symbols
+SYMBOLS = get_okx_swaps(TOP_SYMBOLS)
+print("Trading symbols:", SYMBOLS)
+
+CYCLE_DELAY = 900  # 15 minutes
 
 while True:
-    cycle_start = datetime.utcnow()
+    cycle_start = datetime.now(timezone.utc)
     print(f"Starting new cycle at {cycle_start.strftime('%H:%M:%S UTC')}")
     
     for sym in SYMBOLS:
@@ -315,8 +317,8 @@ while True:
             status = "✅ signal sent" if result else "❌ no signal"
         except Exception as e:
             status = f"⚠ Error: {e}"
-        print(f"{sym} scanned at {datetime.utcnow().strftime('%H:%M:%S UTC')} → {status}")
+        print(f"{sym} scanned at {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')} → {status}")
         time.sleep(API_CALL_DELAY)
     
-    print(f"Cycle completed at {datetime.utcnow().strftime('%H:%M:%S UTC')}\n")
-    time.sleep(CYCLE_DELAY)  # wait before next full cycle
+    print(f"Cycle completed at {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}\n")
+    time.sleep(CYCLE_DELAY)

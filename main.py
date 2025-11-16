@@ -1,22 +1,43 @@
 #!/usr/bin/env python3
-# SIRTS Swing Bot v1 — OKX USDT Perps | Signal-Only (patched)
+# SIRTS Swing Bot v1 — OKX USDT Perps | Signal-Only (patched + debug_print + heartbeat)
 # Improvements:
 # - safer requests (session, timeouts, retries, backoff)
 # - re-fetch symbols each cycle
 # - fallback to tickers if instruments endpoint fails
 # - ensure klines are ordered oldest -> newest
 # - clearer debug/warning messages
+# - forced stdout line-buffering + debug_print wrapper + startup heartbeat
 # Requirements: requests, pandas, numpy
 # Environment variables: BOT_TOKEN, CHAT_ID
 
+import sys
+import threading
+import time
 import os
 import re
-import time
 import requests
 import pandas as pd
 import numpy as np
 import csv
 from datetime import datetime, timezone
+
+# Force real-time logging (best-effort)
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
+def debug_print(*args, **kwargs):
+    """Print that always flushes to stdout for Render/logging."""
+    print(*args, **kwargs, flush=True)
+
+def startup_heartbeat():
+    for i in range(6):  # 6 heartbeats, 10s apart (1 minute)
+        debug_print(f"[HEARTBEAT] Bot is running... ({i+1}/6)")
+        time.sleep(10)
+
+# run heartbeat in background
+threading.Thread(target=startup_heartbeat, daemon=True).start()
 
 # ===== CONFIG =====
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -76,22 +97,22 @@ def safe_get_json(url, params=None, timeout=DEFAULT_TIMEOUT, retries=2, backoff=
             try:
                 j = resp.json()
             except ValueError as e:
-                print(f"[safe_get_json] JSON decode error url={url} params={params}: {e}")
+                debug_print(f"[safe_get_json] JSON decode error url={url} params={params}: {e}")
                 return None
             return j
         except requests.HTTPError as e:
             status = resp.status_code if resp is not None else "??"
             if resp is not None and resp.status_code == 400:
                 # Bad instrument / invalid param — skip
-                print(f"[safe_get_json] 400 invalid instrument -> {params}")
+                debug_print(f"[safe_get_json] 400 invalid instrument -> {params}")
                 return None
-            print(f"[safe_get_json] HTTPError status={status} url={url} params={params} attempt={attempt}: {e}")
+            debug_print(f"[safe_get_json] HTTPError status={status} url={url} params={params} attempt={attempt}: {e}")
         except requests.Timeout as e:
-            print(f"[safe_get_json] Timeout url={url} params={params} attempt={attempt}: {e}")
+            debug_print(f"[safe_get_json] Timeout url={url} params={params} attempt={attempt}: {e}")
         except requests.RequestException as e:
-            print(f"[safe_get_json] RequestException url={url} params={params} attempt={attempt}: {e}")
+            debug_print(f"[safe_get_json] RequestException url={url} params={params} attempt={attempt}: {e}")
         except Exception as e:
-            print(f"[safe_get_json] Exception url={url} params={params} attempt={attempt}: {e}")
+            debug_print(f"[safe_get_json] Exception url={url} params={params} attempt={attempt}: {e}")
 
         if attempt < retries:
             sleep_for = backoff * (2 ** attempt)
@@ -107,7 +128,7 @@ def sanitize_symbol(symbol: str) -> str:
 
 def send_message(text):
     if not BOT_TOKEN or not CHAT_ID:
-        print("Telegram not configured:", text)
+        debug_print("Telegram not configured:", text)
         return False
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -115,7 +136,7 @@ def send_message(text):
         session.post(url, json={"chat_id": CHAT_ID, "text": text}, timeout=10)
         return True
     except Exception as e:
-        print("Telegram send error:", e)
+        debug_print("Telegram send error:", e)
         return False
 
 def interval_to_okx(interval):
@@ -296,7 +317,7 @@ def log_signal(row):
             writer = csv.writer(f)
             writer.writerow(row)
     except Exception as e:
-        print("log_signal error:", e)
+        debug_print("log_signal error:", e)
 
 # ===== DYNAMIC SYMBOL FETCH =====
 def get_okx_swaps(top_n=TOP_SYMBOLS):
@@ -311,7 +332,7 @@ def get_okx_swaps(top_n=TOP_SYMBOLS):
     swaps = list(dict.fromkeys(swaps))  # dedupe preserving order
     # fallback: if primary instruments endpoint failed or returned empty, use tickers endpoint
     if not swaps:
-        print("[get_okx_swaps] Primary instruments endpoint returned empty — falling back to tickers endpoint.")
+        debug_print("[get_okx_swaps] Primary instruments endpoint returned empty — falling back to tickers endpoint.")
         t = safe_get_json(OKX_TICKERS, params=None, timeout=6, retries=1)
         if t and "data" in t:
             # collect unique USDT-SWAP instIds until top_n
@@ -324,7 +345,7 @@ def get_okx_swaps(top_n=TOP_SYMBOLS):
     # final fallback: minimal static list to avoid empty runs (you can customize)
     if not swaps:
         static = ["BTC", "ETH", "SOL", "LTC", "LINK"]
-        print("[get_okx_swaps] tickers fallback empty — using static fallback list:", static)
+        debug_print("[get_okx_swaps] tickers fallback empty — using static fallback list:", static)
         swaps = static[:top_n]
     return swaps[:top_n]
 
@@ -332,30 +353,30 @@ def get_okx_swaps(top_n=TOP_SYMBOLS):
 def analyze_symbol(symbol, btc_ok=None, btc_dir=None):
     global open_trades, recent_signals, last_trade_time
     now = time.time()
-    print(f"\n--- Analyzing {symbol} ---")
+    debug_print(f"\n--- Analyzing {symbol} ---")
 
     if symbol in recent_signals and recent_signals[symbol] + RECENT_SIGNAL_SIGNATURE_EXPIRE > now:
-        print(f"[{symbol}] Skipping: recent signal cooldown")
+        debug_print(f"[{symbol}] Skipping: recent signal cooldown")
         return False
 
     vol24 = get_24h_quote_volume(symbol)
-    print(f"[{symbol}] 24h quote volume: {vol24}")
+    debug_print(f"[{symbol}] 24h quote volume: {vol24}")
     if vol24 < MIN_QUOTE_VOLUME:
-        print(f"[{symbol}] Skipping: below MIN_QUOTE_VOLUME")
+        debug_print(f"[{symbol}] Skipping: below MIN_QUOTE_VOLUME")
         return False
 
     if last_trade_time.get(symbol, 0) > now:
-        print(f"[{symbol}] Skipping: cooldown active until {datetime.fromtimestamp(last_trade_time.get(symbol,0), tz=timezone.utc).isoformat()}")
+        debug_print(f"[{symbol}] Skipping: cooldown active until {datetime.fromtimestamp(last_trade_time.get(symbol,0), tz=timezone.utc).isoformat()}")
         return False
 
     # BTC trend check
     if symbol != "BTC":
         if btc_ok is False or btc_dir is None:
-            print(f"[{symbol}] Skipping: BTC trend not aligned")
+            debug_print(f"[{symbol}] Skipping: BTC trend not aligned")
             return False
-        print(f"[{symbol}] BTC trend OK: {btc_dir}")
+        debug_print(f"[{symbol}] BTC trend OK: {btc_dir}")
         if btc_volatility_spike():
-            print(f"[{symbol}] Skipping: BTC volatility spike")
+            debug_print(f"[{symbol}] Skipping: BTC volatility spike")
             return False
 
     tf_confirmations = 0
@@ -368,7 +389,7 @@ def analyze_symbol(symbol, btc_ok=None, btc_dir=None):
     for tf in TIMEFRAMES:
         df = get_klines(symbol, tf)
         if df is None or len(df) < 60:
-            print(f"[{symbol}] TF {tf} skipped: not enough klines (len={0 if df is None else len(df)})")
+            debug_print(f"[{symbol}] TF {tf} skipped: not enough klines (len={0 if df is None else len(df)})")
             breakdown_per_tf[tf] = None
             continue
 
@@ -388,7 +409,7 @@ def analyze_symbol(symbol, btc_ok=None, btc_dir=None):
         breakdown_per_tf[tf] = {"bull_score": int(bull_score), "bear_score": int(bear_score), "bias": bias,
                                 "vol_ok": volok, "crt_b": crt_b, "crt_s": crt_s, "ts_b": ts_b, "ts_s": ts_s}
 
-        print(f"[{symbol}] TF {tf} → Bull: {int(bull_score)} Bear: {int(bear_score)} Bias: {bias} VolOK: {volok} CRT: {crt_b}/{crt_s} Turtle: {ts_b}/{ts_s}")
+        debug_print(f"[{symbol}] TF {tf} → Bull: {int(bull_score)} Bear: {int(bear_score)} Bias: {bias} VolOK: {volok} CRT: {crt_b}/{crt_s} Turtle: {ts_b}/{ts_s}")
 
         per_tf_scores.append(max(bull_score, bear_score))
         if bull_score >= MIN_TF_SCORE:
@@ -402,24 +423,24 @@ def analyze_symbol(symbol, btc_ok=None, btc_dir=None):
             chosen_entry = float(df["close"].iloc[-1])
             confirming_tfs.append(tf)
 
-    print(f"[{symbol}] TF confirmations: {tf_confirmations}, Chosen dir: {chosen_dir}, Entry: {chosen_entry}")
+    debug_print(f"[{symbol}] TF confirmations: {tf_confirmations}, Chosen dir: {chosen_dir}, Entry: {chosen_entry}")
 
     if tf_confirmations < CONF_MIN_TFS or chosen_dir is None:
-        print(f"[{symbol}] Skipping: not enough TF confirmations")
+        debug_print(f"[{symbol}] Skipping: not enough TF confirmations")
         return False
 
     confidence_pct = max(0.0, min(100.0, float(np.mean(per_tf_scores)) if per_tf_scores else 0.0))
     tp1 = tp2 = tp3 = sl = None
     sl, tp1, tp2, tp3 = trade_params(symbol, chosen_entry, chosen_dir)
     if sl is None:
-        print(f"[{symbol}] Skipping: ATR/trade params not available")
+        debug_print(f"[{symbol}] Skipping: ATR/trade params not available")
         return False
 
     units, margin, exposure, risk_used = pos_size_units(chosen_entry, sl, confidence_pct)
-    print(f"[{symbol}] Units: {units}, Margin: {margin}, Exposure: {exposure}, Confidence: {confidence_pct:.1f}%")
+    debug_print(f"[{symbol}] Units: {units}, Margin: {margin}, Exposure: {exposure}, Confidence: {confidence_pct:.1f}%")
 
     if units <= 0 or exposure > CAPITAL * MAX_EXPOSURE_PCT:
-        print(f"[{symbol}] Skipping: position sizing rules not met (units={units} exposure={exposure})")
+        debug_print(f"[{symbol}] Skipping: position sizing rules not met (units={units} exposure={exposure})")
         return False
 
     # Send signal
@@ -435,7 +456,7 @@ def analyze_symbol(symbol, btc_ok=None, btc_dir=None):
 if __name__ == "__main__":
     init_csv()
     send_message("✅ SIRTS Swing Bot Signal-Only deployed on OKX. (patched version)")
-    print("[INFO] Bot started. Fetching trading symbols each cycle.")
+    debug_print("[INFO] Bot started. Fetching trading symbols each cycle.")
 
     CYCLE_DELAY = 60  # seconds per cycle — change to 900 for 15 minutes in production
     API_CALL_DELAY = 0.2  # delay between symbol processing
@@ -443,50 +464,50 @@ if __name__ == "__main__":
     # initial quick BTC trend check cached per cycle
     while True:
         cycle_start = datetime.now(timezone.utc)
-        print(f"[DEBUG] Starting new cycle at {cycle_start.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        debug_print(f"[DEBUG] Starting new cycle at {cycle_start.strftime('%Y-%m-%d %H:%M:%S UTC')}")
 
         # Re-fetch symbols each cycle (robust)
         SYMBOLS = get_okx_swaps(TOP_SYMBOLS)
-        print("[DEBUG] Trading symbols fetched:", SYMBOLS)
+        debug_print("[DEBUG] Trading symbols fetched:", SYMBOLS)
 
         if not SYMBOLS:
-            print("[WARN] No symbols found this cycle. Will retry after short sleep.")
+            debug_print("[WARN] No symbols found this cycle. Will retry after short sleep.")
             time.sleep(30)
             continue
 
         # Evaluate BTC trend once per cycle and reuse for symbols
         btc_ok, btc_dir, btc_sma_trend = btc_trend_agree()
-        print(f"[DEBUG] BTC trend check -> btc_ok: {btc_ok} btc_dir: {btc_dir} sma_trend: {btc_sma_trend}")
+        debug_print(f"[DEBUG] BTC trend check -> btc_ok: {btc_ok} btc_dir: {btc_dir} sma_trend: {btc_sma_trend}")
 
         for sym in SYMBOLS:
-            print(f"[DEBUG] >>> Processing symbol: {sym}")
+            debug_print(f"[DEBUG] >>> Processing symbol: {sym}")
             try:
                 vol24 = get_24h_quote_volume(sym)
-                print(f"[DEBUG] {sym} 24h quote volume: {vol24}")
+                debug_print(f"[DEBUG] {sym} 24h quote volume: {vol24}")
 
                 if vol24 < MIN_QUOTE_VOLUME:
-                    print(f"[DEBUG] {sym} skipped: below min quote volume ({vol24} < {MIN_QUOTE_VOLUME})")
+                    debug_print(f"[DEBUG] {sym} skipped: below min quote volume ({vol24} < {MIN_QUOTE_VOLUME})")
                     continue
 
                 # Optionally prefetch klines for debug (analysis_symbol will fetch again)
                 for tf in TIMEFRAMES:
-                    print(f"[DEBUG] Fetching {tf} klines for {sym}")
+                    debug_print(f"[DEBUG] Fetching {tf} klines for {sym}")
                     df = get_klines(sym, tf)
                     if df is None or len(df) < 10:
-                        print(f"[DEBUG] {sym} {tf} klines insufficient (len={0 if df is None else len(df)})")
+                        debug_print(f"[DEBUG] {sym} {tf} klines insufficient (len={0 if df is None else len(df)})")
                     else:
-                        print(f"[DEBUG] {sym} {tf} klines fetched, last close: {df['close'].iloc[-1]}")
+                        debug_print(f"[DEBUG] {sym} {tf} klines fetched, last close: {df['close'].iloc[-1]}")
 
                 result = analyze_symbol(sym, btc_ok=btc_ok, btc_dir=btc_dir)
                 status = "✅ signal sent" if result else "❌ no signal"
 
             except Exception as e:
                 status = f"⚠ Error: {e}"
-                print(f"[ERROR] processing {sym}: {e}")
-            print(f"[DEBUG] {sym} scanned at {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')} → {status}")
+                debug_print(f"[ERROR] processing {sym}: {e}")
+            debug_print(f"[DEBUG] {sym} scanned at {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')} → {status}")
 
             # rate-limit friendly delay
             time.sleep(API_CALL_DELAY)
 
-        print(f"[DEBUG] Cycle completed at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n")
+        debug_print(f"[DEBUG] Cycle completed at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n")
         time.sleep(CYCLE_DELAY)

@@ -280,21 +280,30 @@ def trade_params(symbol, entry, side, atr_multiplier_sl=2.0, tp_mults=(2.0,3.0,4
         tp3 = entry - atr * tp_mults[2]
     return sl, tp1, tp2, tp3
 
-def pos_size_units(entry, sl, confidence_pct):
-    risk_percent = max(0.01, min(0.06, 0.05 + (confidence_pct/100)*0.01))
+def pos_size_units(symbol, entry, sl, confidence_pct):
+    risk_percent = max(0.01, min(0.06, 0.05 + (confidence_pct / 100) * 0.01))
     risk_usd = CAPITAL * risk_percent
+
     sl_dist = abs(entry - sl)
     min_sl = max(entry * MIN_SL_DISTANCE_PCT, 1e-8)
     if sl_dist < min_sl:
         return 0, 0, 0, risk_percent
+
     units = risk_usd / sl_dist
     exposure = units * entry
     max_exposure = CAPITAL * MAX_EXPOSURE_PCT
-    if exposure > max_exposure:
-        units = max_exposure / entry
+
+    # ⭐ BTC ignores exposure restrictions
+    if symbol != "BTC":
+        if exposure > max_exposure:
+            units = max_exposure / entry
+            exposure = units * entry
+
     margin_req = exposure / LEVERAGE
+
     if margin_req < MIN_MARGIN_USD:
         return 0, 0, 0, risk_percent
+
     return round(units, 8), round(margin_req, 2), round(exposure, 2), risk_percent
 
 # ===== BTC TREND & VOLATILITY =====

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SIRTS Swing Bot v1 — Bybit USDT Perps | Signal-Only
+# SIRTS Swing Bot v2 — Bybit USDT Perps | Signal-Only | Top 80
 # Requirements: requests, pandas, numpy
 # Environment variables: BOT_TOKEN, CHAT_ID
 
@@ -33,7 +33,7 @@ CONF_MIN_TFS  = 2
 CONFIDENCE_MIN = 60.0
 
 MIN_QUOTE_VOLUME = 5000000  # $5M 24h minimum
-TOP_SYMBOLS = 50
+TOP_SYMBOLS = 80
 
 BYBIT_BASE      = "https://api.bybit.com"
 BYBIT_KLINES    = f"{BYBIT_BASE}/v5/market/kline"
@@ -133,47 +133,69 @@ def get_24h_quote_volume(symbol):
             return vol * last
     return 0.0
 
+# ===== GET TOP SYMBOLS =====
+def get_top_symbols(n=80):
+    j = safe_get_json(BYBIT_TICKERS, params={"category":"linear"})
+    if not j or "result" not in j or "list" not in j["result"]:
+        return ["BTCUSDT","ETHUSDT"]
+    tickers = j["result"]["list"]
+    sym_vol = []
+    for d in tickers:
+        sym = d.get("symbol","")
+        if not sym.endswith("USDT"):
+            continue
+        try:
+            vol24 = float(d.get("volume24h",0))
+            price = float(d.get("lastPrice",0)) or 1.0
+            quote_vol = vol24*price
+            sym_vol.append((sym,quote_vol))
+        except:
+            continue
+    sym_vol.sort(key=lambda x:x[1], reverse=True)
+    top = [s for s,v in sym_vol[:n]]
+    return top
+
 # ===== INDICATORS =====
 def smc_bias(df):
     e20 = df["close"].ewm(span=20).mean().iloc[-1]
     e50 = df["close"].ewm(span=50).mean().iloc[-1]
-    return "bull" if e20 > e50 else "bear"
+    return "bull" if e20>e50 else "bear"
 
 def detect_crt(df):
-    if len(df) < 12: return False, False
+    if len(df)<12: return False,False
     last = df.iloc[-1]
-    o, h, l, c, v = last["open"], last["high"], last["low"], last["close"], last["volume"]
+    o,h,l,c,v = last["open"],last["high"],last["low"],last["close"],last["volume"]
     body_series = (df["close"]-df["open"]).abs()
-    avg_body = body_series.rolling(8, min_periods=6).mean().iloc[-1]
+    avg_body = body_series.rolling(8,min_periods=6).mean().iloc[-1]
     avg_vol = df["volume"].rolling(8,min_periods=6).mean().iloc[-1]
-    if np.isnan(avg_body) or np.isnan(avg_vol): return False, False
+    if np.isnan(avg_body) or np.isnan(avg_vol): return False,False
     body = abs(c-o)
     wick_up, wick_down = h-max(o,c), min(o,c)-l
     bull = (body<avg_body*0.8) and (wick_down>avg_body*0.5) and (v<avg_vol*1.5) and (c>o)
     bear = (body<avg_body*0.8) and (wick_up>avg_body*0.5) and (v<avg_vol*1.5) and (c<o)
-    return bull, bear
+    return bull,bear
 
 def detect_turtle(df, look=20):
-    if len(df) < look+2: return False, False
+    if len(df)<look+2: return False,False
     ph = df["high"].iloc[-look-1:-1].max()
     pl = df["low"].iloc[-look-1:-1].min()
     last = df.iloc[-1]
-    bull = last["low"] < pl and last["close"] > pl*1.002
-    bear = last["high"] > ph and last["close"] < ph*0.998
-    return bull, bear
+    bull = last["low"]<pl and last["close"]>pl*1.002
+    bear = last["high"]>ph and last["close"]<ph*0.998
+    return bull,bear
 
 def volume_ok(df):
     ma = df["volume"].rolling(20,min_periods=8).mean().iloc[-1]
     if np.isnan(ma): return True
-    return df["volume"].iloc[-1] > ma*1.3
+    return df["volume"].iloc[-1]>ma*1.3
 
 # ===== ATR & POSITION SIZING =====
 def get_atr(symbol, period=14):
     df = get_klines(symbol,"4h",period+1)
     if df is None or len(df)<period+1: return None
-    h, l, c = df["high"].values, df["low"].values, df["close"].values
+    h,l,c = df["high"].values, df["low"].values, df["close"].values
     trs = [max(h[i]-l[i], abs(h[i]-c[i-1]), abs(l[i]-c[i-1])) for i in range(1,len(df))]
-    return max(float(np.mean(trs)), 1e-8)
+    return max(float(np.mean(trs)),1e-8)
 
 def trade_params(symbol, entry, side, atr_multiplier_sl=2.0, tp_mults=(2.0,3.0,4.0)):
     atr = get_atr(symbol)
@@ -181,10 +203,10 @@ def trade_params(symbol, entry, side, atr_multiplier_sl=2.0, tp_mults=(2.0,3.0,4
     atr = max(min(atr, entry*0.1), entry*0.001)
     if side=="BUY":
         sl = entry - atr*atr_multiplier_sl
-        tp1,tp2,tp3 = entry + atr*tp_mults[0], entry + atr*tp_mults[1], entry + atr*tp_mults[2]
+        tp1,tp2,tp3 = entry+atr*tp_mults[0], entry+atr*tp_mults[1], entry+atr*tp_mults[2]
     else:
         sl = entry + atr*atr_multiplier_sl
-        tp1,tp2,tp3 = entry - atr*tp_mults[0], entry - atr*tp_mults[1], entry - atr*tp_mults[2]
+        tp1,tp2,tp3 = entry-atr*tp_mults[0], entry-atr*tp_mults[1], entry-atr*tp_mults[2]
     return sl,tp1,tp2,tp3
 
 def pos_size_units(entry, sl, confidence_pct):
@@ -235,7 +257,7 @@ def log_signal(row):
 
 # ===== ANALYSIS & SIGNAL GENERATION =====
 def analyze_symbol(symbol):
-    global open_trades, recent_signals, last_trade_time
+    global open_trades,recent_signals,last_trade_time
     now = time.time()
     if symbol in recent_signals and recent_signals[symbol]+RECENT_SIGNAL_SIGNATURE_EXPIRE>now:
         return False
@@ -293,10 +315,11 @@ def analyze_symbol(symbol):
 # ===== MAIN LOOP (15-minute interval) =====
 init_csv()
 send_message("✅ SIRTS Swing Bot Signal-Only deployed.")
-SYMBOLS = ["BTCUSDT","ETHUSDT"]  # or get_top_symbols()
 
 while True:
     start_time = time.time()
+    SYMBOLS = get_top_symbols(TOP_SYMBOLS)
+    print("Top symbols:", SYMBOLS)
 
     # Scan all symbols
     for sym in SYMBOLS:
@@ -305,7 +328,6 @@ while True:
         except Exception as e:
             print(f"Error scanning {sym}: {e}")
         time.sleep(API_CALL_DELAY)
-
 
     # Wait until 15 minutes have passed since start of cycle
     elapsed = time.time() - start_time

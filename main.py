@@ -32,7 +32,7 @@ CONF_MIN_TFS  = 2
 CONFIDENCE_MIN = 60.0
 
 MIN_QUOTE_VOLUME = 5000000
-TOP_SYMBOLS = 80
+TOP_SYMBOLS = 20
 
 OKX_KLINES   = "https://www.okx.com/api/v5/market/candles"
 OKX_TICKERS  = "https://www.okx.com/api/v5/market/tickers"

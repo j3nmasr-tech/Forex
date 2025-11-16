@@ -306,8 +306,7 @@ while True:
             print(f"Error scanning {sym}: {e}")
         time.sleep(API_CALL_DELAY)
 
-    # Optional: check open trades (SL/TP)
-    check_trades()
+    # check_trades()  # <-- remove this line for signal-only swing bot
 
     # Wait until 15 minutes have passed since start of cycle
     elapsed = time.time() - start_time

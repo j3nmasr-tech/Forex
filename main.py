@@ -242,59 +242,89 @@ def get_okx_swaps(top_n=TOP_SYMBOLS):
     return swaps[:top_n]
 
 # ===== ANALYSIS & SIGNAL GENERATION =====
-def analyze_symbol(symbol):
+def analyze_symbol(symbol, btc_ok=None, btc_dir=None):
     global open_trades, recent_signals, last_trade_time
     now = time.time()
-    if symbol in recent_signals and recent_signals[symbol]+RECENT_SIGNAL_SIGNATURE_EXPIRE>now:
-        return False
-    vol24 = get_24h_quote_volume(symbol)
-    if vol24<MIN_QUOTE_VOLUME: return False
-    if last_trade_time.get(symbol,0)>now: return False
+    print(f"\n--- Analyzing {symbol} ---")
 
-    if symbol!="BTC":
-        btc_ok, btc_dir, btc_sma = btc_trend_agree()
-        if btc_ok is False or btc_dir is None: return False
-        if btc_dir=="bear": return False  # block BUY
-        if btc_dir=="bull": return False  # block SELL
-        if btc_volatility_spike(): return False
+    if symbol in recent_signals and recent_signals[symbol]+RECENT_SIGNAL_SIGNATURE_EXPIRE>now:
+        print(f"[{symbol}] Skipping: recent signal cooldown")
+        return False
+
+    vol24 = get_24h_quote_volume(symbol)
+    print(f"[{symbol}] 24h quote volume: {vol24}")
+    if vol24 < MIN_QUOTE_VOLUME:
+        print(f"[{symbol}] Skipping: below MIN_QUOTE_VOLUME")
+        return False
+
+    if last_trade_time.get(symbol,0) > now:
+        print(f"[{symbol}] Skipping: cooldown active")
+        return False
+
+    # BTC trend check
+    if symbol != "BTC":
+        if btc_ok is False or btc_dir is None:
+            print(f"[{symbol}] Skipping: BTC trend not aligned")
+            return False
+        print(f"[{symbol}] BTC trend OK: {btc_dir}")
+        if btc_volatility_spike():
+            print(f"[{symbol}] Skipping: BTC volatility spike")
+            return False
 
     tf_confirmations, chosen_dir, chosen_entry, per_tf_scores, confirming_tfs = 0,None,None,[],[]
     breakdown_per_tf = {}
+
     for tf in TIMEFRAMES:
-        df = get_klines(symbol,tf)
+        df = get_klines(symbol, tf)
         if df is None or len(df)<60:
+            print(f"[{symbol}] TF {tf} skipped: not enough klines")
             breakdown_per_tf[tf]=None
             continue
+
         crt_b, crt_s = detect_crt(df)
         ts_b, ts_s = detect_turtle(df)
         bias = smc_bias(df)
         volok = volume_ok(df)
         bull_score = (WEIGHT_CRT*(1 if crt_b else 0)+WEIGHT_TURTLE*(1 if ts_b else 0)+WEIGHT_VOLUME*(1 if volok else 0)+WEIGHT_BIAS*(1 if bias=="bull" else 0))*100
         bear_score = (WEIGHT_CRT*(1 if crt_s else 0)+WEIGHT_TURTLE*(1 if ts_s else 0)+WEIGHT_VOLUME*(1 if volok else 0)+WEIGHT_BIAS*(1 if bias=="bear" else 0))*100
+
         breakdown_per_tf[tf]={"bull_score":int(bull_score),"bear_score":int(bear_score),"bias":bias,"vol_ok":volok,"crt_b":crt_b,"crt_s":crt_s,"ts_b":ts_b,"ts_s":ts_s}
+
+        print(f"[{symbol}] TF {tf} → Bull: {int(bull_score)} Bear: {int(bear_score)} Bias: {bias} VolOK: {volok} CRT: {crt_b}/{crt_s} Turtle: {ts_b}/{ts_s}")
+
         per_tf_scores.append(max(bull_score,bear_score))
         if bull_score>=MIN_TF_SCORE:
-            tf_confirmations+=1
-            chosen_dir="BUY"
-            chosen_entry=float(df["close"].iloc[-1])
+            tf_confirmations += 1
+            chosen_dir = "BUY"
+            chosen_entry = float(df["close"].iloc[-1])
             confirming_tfs.append(tf)
         elif bear_score>=MIN_TF_SCORE:
-            tf_confirmations+=1
-            chosen_dir="SELL"
-            chosen_entry=float(df["close"].iloc[-1])
+            tf_confirmations += 1
+            chosen_dir = "SELL"
+            chosen_entry = float(df["close"].iloc[-1])
             confirming_tfs.append(tf)
 
-    if tf_confirmations<CONF_MIN_TFS or chosen_dir is None: return False
-    confidence_pct = max(0.0,min(100.0,float(np.mean(per_tf_scores))))    
-    sl,tp1,tp2,tp3 = trade_params(symbol,chosen_entry,chosen_dir)
-    units,margin,exposure,risk_used = pos_size_units(chosen_entry,sl,confidence_pct)
-    if units<=0 or exposure>CAPITAL*MAX_EXPOSURE_PCT: return False
+    print(f"[{symbol}] TF confirmations: {tf_confirmations}, Chosen dir: {chosen_dir}, Entry: {chosen_entry}")
+
+    if tf_confirmations < CONF_MIN_TFS or chosen_dir is None:
+        print(f"[{symbol}] Skipping: not enough TF confirmations")
+        return False
+
+    confidence_pct = max(0.0,min(100.0,float(np.mean(per_tf_scores))))
+    sl,tp1,tp2,tp3 = trade_params(symbol, chosen_entry, chosen_dir)
+    units, margin, exposure, risk_used = pos_size_units(chosen_entry, sl, confidence_pct)
+    print(f"[{symbol}] Units: {units}, Margin: {margin}, Exposure: {exposure}, Confidence: {confidence_pct:.1f}%")
+
+    if units <= 0 or exposure > CAPITAL*MAX_EXPOSURE_PCT:
+        print(f"[{symbol}] Skipping: position sizing rules not met")
+        return False
 
     send_message(f"✅ {chosen_dir} {symbol}\nEntry: {chosen_entry}\nTP1:{tp1} TP2:{tp2} TP3:{tp3}\nSL:{sl}\nUnits:{units} Margin:${margin} Exposure:${exposure}\nConf:{confidence_pct:.1f}% TFs:{', '.join(confirming_tfs)}")
-    log_signal([datetime.now(timezone.utc).isoformat(),symbol,chosen_dir,chosen_entry,tp1,tp2,tp3,sl,','.join(confirming_tfs),units,margin,exposure,risk_used,confidence_pct,"open"])
+    log_signal([datetime.now(timezone.utc).isoformat(), symbol, chosen_dir, chosen_entry, tp1, tp2, tp3, sl, ','.join(confirming_tfs), units, margin, exposure, risk_used, confidence_pct, "open"])
+
     open_trades.append({"symbol":symbol,"side":chosen_dir,"entry":chosen_entry,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sl":sl,"units":units,"margin":margin,"exposure":exposure,"confidence_pct":confidence_pct,"status":"open"})
-    recent_signals[symbol]=now
-    last_trade_time[symbol]=now+COOLDOWN_TIME_DEFAULT
+    recent_signals[symbol] = now
+    last_trade_time[symbol] = now + COOLDOWN_TIME_DEFAULT
     return True
 
 # ===== MAIN LOOP =====
@@ -309,16 +339,20 @@ CYCLE_DELAY = 900  # 15 minutes
 
 while True:
     cycle_start = datetime.now(timezone.utc)
-    print(f"Starting new cycle at {cycle_start.strftime('%H:%M:%S UTC')}")
-    
+    print(f"\n=== Starting new cycle at {cycle_start.strftime('%H:%M:%S UTC')} ===")
+
+    # Fetch BTC trend once per cycle
+    btc_ok, btc_dir, btc_sma = btc_trend_agree()
+    print(f"[BTC] Trend check → OK: {btc_ok}, Dir: {btc_dir}, SMA trend: {btc_sma}")
+
     for sym in SYMBOLS:
         try:
-            result = analyze_symbol(sym)
+            result = analyze_symbol(sym, btc_ok=btc_ok, btc_dir=btc_dir)
             status = "✅ signal sent" if result else "❌ no signal"
         except Exception as e:
             status = f"⚠ Error: {e}"
-        print(f"{sym} scanned at {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')} → {status}")
+        print(f"[{sym}] Scan result → {status}")
         time.sleep(API_CALL_DELAY)
-    
-    print(f"Cycle completed at {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}\n")
+
+    print(f"=== Cycle completed at {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')} ===\n")
     time.sleep(CYCLE_DELAY)

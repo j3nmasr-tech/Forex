@@ -69,15 +69,16 @@ def send_message(text):
         print("Telegram send error:", e)
         return False
 
-def safe_get_json(url, params=None, timeout=5, retries=2):
+def safe_get_json(url, params=None, timeout=3, retries=1):
     for attempt in range(retries+1):
         try:
             r = requests.get(url, params=params, timeout=timeout)
             r.raise_for_status()
             return r.json()
         except Exception as e:
+            print(f"Request error: {e} url={url} params={params}")
             if attempt < retries:
-                time.sleep(0.5)
+                time.sleep(0.2)
                 continue
             return None
 

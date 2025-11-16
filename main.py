@@ -321,32 +321,48 @@ def log_signal(row):
 
 # ===== DYNAMIC SYMBOL FETCH =====
 def get_okx_swaps(top_n=TOP_SYMBOLS):
-    params = {"instType": "SWAP", "uly": "USDT"}
+    """
+    Fetch clean USDT perpetual swap symbols.
+    Filters, sanitizes, and corrects malformed instrument IDs.
+    Always returns clean base symbols like: BTC, ETH, SOL, LINK.
+    """
+    params = {"instType": "SWAP"}
     data = safe_get_json(OKX_INSTR, params=params, timeout=8, retries=2)
+
     swaps = []
+
     if data and "data" in data:
         for inst in data["data"]:
             inst_id = inst.get("instId", "")
             if inst_id.endswith("-USDT-SWAP"):
-                swaps.append(inst_id.replace("-USDT-SWAP", ""))
-    swaps = list(dict.fromkeys(swaps))  # dedupe preserving order
-    # fallback: if primary instruments endpoint failed or returned empty, use tickers endpoint
+                base = inst_id.replace("-USDT-SWAP", "")
+                base = sanitize_symbol(base)              # << SANITIZE FIX
+                if base and len(base) >= 2:               # Avoid INK / NK / K errors
+                    swaps.append(base)
+
+    swaps = list(dict.fromkeys(swaps))  # dedupe
+
+    # fallback from tickers
     if not swaps:
-        debug_print("[get_okx_swaps] Primary instruments endpoint returned empty — falling back to tickers endpoint.")
-        t = safe_get_json(OKX_TICKERS, params=None, timeout=6, retries=1)
+        debug_print("[get_okx_swaps] Primary endpoint empty — fallback to tickers")
+        t = safe_get_json(OKX_TICKERS, timeout=6)
         if t and "data" in t:
-            # collect unique USDT-SWAP instIds until top_n
             for d in t["data"]:
                 inst_id = d.get("instId", "")
                 if inst_id.endswith("-USDT-SWAP"):
-                    swaps.append(inst_id.replace("-USDT-SWAP", ""))
+                    base = inst_id.replace("-USDT-SWAP", "")
+                    base = sanitize_symbol(base)
+                    if base and len(base) >= 2:
+                        swaps.append(base)
                 if len(swaps) >= top_n:
                     break
-    # final fallback: minimal static list to avoid empty runs (you can customize)
+
+    # final static fallback
     if not swaps:
         static = ["BTC", "ETH", "SOL", "LTC", "LINK"]
-        debug_print("[get_okx_swaps] tickers fallback empty — using static fallback list:", static)
+        debug_print("[get_okx_swaps] Using static fallback list.")
         swaps = static[:top_n]
+
     return swaps[:top_n]
 
 # ===== ANALYSIS & SIGNAL GENERATION =====
@@ -458,7 +474,7 @@ if __name__ == "__main__":
     send_message("✅ SIRTS Swing Bot Signal-Only deployed on OKX. (patched version)")
     debug_print("[INFO] Bot started. Fetching trading symbols each cycle.")
 
-    CYCLE_DELAY = 60  # seconds per cycle — change to 900 for 15 minutes in production
+    CYCLE_DELAY = 900  # seconds per cycle — change to 900 for 15 minutes in production
     API_CALL_DELAY = 0.2  # delay between symbol processing
 
     # initial quick BTC trend check cached per cycle

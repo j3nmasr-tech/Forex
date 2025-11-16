@@ -75,12 +75,16 @@ def safe_get_json(url, params=None, timeout=3, retries=1):
             r = requests.get(url, params=params, timeout=timeout)
             r.raise_for_status()
             return r.json()
+        except requests.HTTPError as e:
+            if r.status_code == 400:
+                print(f"Skipping bad request: url={url} params={params}")
+                return None
+            print(f"HTTP error: {e} url={url} params={params}")
         except Exception as e:
             print(f"Request error: {e} url={url} params={params}")
-            if attempt < retries:
-                time.sleep(0.2)
-                continue
-            return None
+        if attempt < retries:
+            time.sleep(0.2)
+    return None
 
 def interval_to_okx(interval):
     # OKX uses: 1m, 3m, 5m, 15m, 30m, 1H, 2H, 4H, 6H, 12H, 1D, 1W
@@ -288,13 +292,17 @@ def analyze_symbol(symbol):
 # ===== MAIN LOOP =====
 init_csv()
 send_message("✅ SIRTS Swing Bot Signal-Only deployed on OKX.")
-SYMBOLS = ["BTC","ETH","XRP","LTC"]  # Replace with top 80 symbols dynamically if needed
+SYMBOLS = ["BTC","ETH","XRP","LTC"]  # Replace with top valid USDT-SWAP pairs
 
 while True:
     for sym in SYMBOLS:
         try:
-            analyze_symbol(sym)
+            # Skip if symbol data invalid
+            success = analyze_symbol(sym)
+            if success:
+                print(f"Signal sent for {sym}")
         except Exception as e:
             print(f"Error scanning {sym}: {e}")
         time.sleep(API_CALL_DELAY)
-    print(f"Cycle completed at {datetime.utcnow().strftime('%H:%M:%S UTC')}.")
+    # Use timezone-aware datetime to avoid deprecation warning
+    print(f"Cycle completed at {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}.")

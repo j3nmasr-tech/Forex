@@ -303,14 +303,20 @@ init_csv()
 send_message("✅ SIRTS Swing Bot Signal-Only deployed on OKX.")
 SYMBOLS = ["BTC","ETH","XRP","LTC"]  # Replace with top 80 symbols dynamically if needed
 
+CYCLE_DELAY = 900  # 15 minutes between full cycles
+
 while True:
     cycle_start = datetime.utcnow()
+    print(f"Starting new cycle at {cycle_start.strftime('%H:%M:%S UTC')}")
+    
     for sym in SYMBOLS:
         try:
             result = analyze_symbol(sym)
             status = "✅ signal sent" if result else "❌ no signal"
-            print(f"{sym} scanned at {datetime.utcnow().strftime('%H:%M:%S UTC')} → {status}")
         except Exception as e:
-            print(f"Error scanning {sym}: {e}")
+            status = f"⚠ Error: {e}"
+        print(f"{sym} scanned at {datetime.utcnow().strftime('%H:%M:%S UTC')} → {status}")
         time.sleep(API_CALL_DELAY)
-    print(f"Cycle completed at {datetime.utcnow().strftime('%H:%M:%S UTC')}.\n")
+    
+    print(f"Cycle completed at {datetime.utcnow().strftime('%H:%M:%S UTC')}\n")
+    time.sleep(CYCLE_DELAY)  # wait before next full cycle

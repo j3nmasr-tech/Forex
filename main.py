@@ -1,1193 +1,1285 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-🏆 ULTIMATE HYBRID SCANNER v3.1 - OLD FILTER STRICTNESS 🏆
-- YOUR EXACT OLD FILTER LOGIC & SCORING
-- NEW ARCHITECTURE + MONITORING
-- OLD MOMENTUM FILTER APPLICABILITY 
-- OLD SCORING SYSTEM (BASE + 5 BONUS)
-"""
+# SIRTS v10 – Top 80 | Bybit + symbol sanitization + Aggressive Mode defaults
+# ENHANCED WITH MOMENTUM INTEGRITY FRAMEWORK & AEGIS FILTERS
+# Requirements: requests, pandas, numpy
+# BOT_TOKEN and CHAT_ID must be set as environment variables: "BOT_TOKEN", "CHAT_ID"
 
 import os
+import re
 import time
-import asyncio
-import logging
-import datetime
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Any
-from enum import Enum
-import aiosqlite
-import httpx
-import ccxt.async_support as ccxt
+import requests
 import pandas as pd
 import numpy as np
-from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
-from pydantic import BaseModel
-import uvicorn
-from collections import defaultdict, deque
-import json
-from contextlib import asynccontextmanager
+from datetime import datetime
+import csv
 
-# ==================== ENHANCED CONFIGURATION ====================
+# ===== SYMBOL SANITIZATION =====
+def sanitize_symbol(symbol: str) -> str:
+    """Ensure symbol only contains legal Bybit characters and is upper-case.
+       Allow letters, numbers, - _ . and max length 20."""
+    if not symbol or not isinstance(symbol, str):
+        return ""
+    s = re.sub(r"[^A-Z0-9_.-]", "", symbol.upper())
+    return s[:20]
 
-class Timeframe(Enum):
-    M1 = "1m"
-    M3 = "3m" 
-    M5 = "5m"
-    M15 = "15m"
-    M30 = "30m"
-    H1 = "1h"
+# ===== CONFIG =====
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID   = os.getenv("CHAT_ID")
 
-class SignalSide(Enum):
-    BUY = "BUY"
-    SELL = "SELL"
+CAPITAL = 80.0
+LEVERAGE = 30
+COOLDOWN_TIME_DEFAULT = 1800
+COOLDOWN_TIME_SUCCESS = 15 * 60
+COOLDOWN_TIME_FAIL    = 45 * 60
 
-@dataclass
-class ScannerConfig:
-    # Core settings (from OLD system)
-    SCAN_INTERVAL: int = 60
-    TOP_N_SYMBOLS: int = 80  # OLD: 40
-    MIN_VOLUME_USDT: float = 1000000
-    MAX_SPREAD_PCT: float = 0.002
-    
-    # OLD FILTER SETTINGS
-    MIN_SIGNAL_SCORE: int = 0  # OLD: No minimum score in filters
-    COOLDOWN_MINUTES: int = 30
-    MAX_SL_CLUSTER_HITS: int = 3
-    
-    # OLD WINNER FILTER SETTINGS (EXACT OLD BEHAVIOR)
-    REQUIRE_BTC_ALIGNMENT: bool = True
-    REQUIRE_HIGHER_TF_ALIGNMENT: bool = True
-    REQUIRE_MOMENTUM_CONFIRMATION: bool = True
-    REQUIRE_ZONE_QUALITY: bool = True
-    AVOID_CHOPPY_MARKETS: bool = True
-    USE_MARKET_REGIME: bool = False  # OLD: No market regime filter!
-    
-    # OLD SCORING
-    WINNER_BONUS: int = 5  # OLD: Fixed +5 bonus
+VOLATILITY_THRESHOLD_PCT = 2.5
+VOLATILITY_PAUSE = 1800
+CHECK_INTERVAL = 60
 
-# ==================== YOUR EXACT OLD WINNER FILTERS ====================
+API_CALL_DELAY = 0.06  # slightly higher for Bybit
 
-class OriginalWinnerFilters:
-    """YOUR EXACT ORIGINAL FILTERS - UNCHANGED"""
-    
-    @staticmethod
-    def get_btc_direction(btc_15m: pd.DataFrame, btc_1h: pd.DataFrame) -> str:
-        """YOUR EXACT BTC DIRECTION DETECTION"""
-        if btc_15m is None or btc_1h is None or btc_15m.empty or btc_1h.empty: 
-            return "NEUTRAL"
-        try:
-            price = btc_15m['close'].iloc[-1]
-            ema_1h_50 = btc_1h['close'].ewm(span=50).mean().iloc[-1]
-            ema_15m_20 = btc_15m['close'].ewm(span=20).mean().iloc[-1]
+TIMEFRAMES = ["15m", "30m", "1h", "4h"]
+
+# ===== IMPROVED SIGNAL QUALITY WEIGHTS =====
+WEIGHT_BIAS   = 0.25    # Less on basic trend
+WEIGHT_TURTLE = 0.35    # More on breakouts (high probability)
+WEIGHT_CRT    = 0.30    # More on reversals  
+WEIGHT_VOLUME = 0.10    # Minimal volume reliance
+
+# ===== ACTIVE TRADER BALANCE =====
+MIN_TF_SCORE  = 55      # Slightly more permissive
+CONF_MIN_TFS  = 2       # Same
+CONFIDENCE_MIN = 58.0   # Reduced from 62.0
+MIN_QUOTE_VOLUME = 1_500_000.0  # More symbols qualify
+TOP_SYMBOLS = 70        # More opportunities
+
+# ===== ADVANCED FILTERS CONFIG =====
+ENABLE_MARKET_REGIME_FILTER = False  # Disabled - too restrictive
+ENABLE_SR_FILTER = True              # Keep enabled - good filter
+ENABLE_MOMENTUM_FILTER = True        # Keep enabled - good filter  
+ENABLE_BTC_DOMINANCE_FILTER = False  # Disabled - too restrictive
+
+# ===== MOMENTUM INTEGRITY FRAMEWORK (OPTIONAL - CAN BE DISABLED) =====
+ENABLE_TREND_ALIGNMENT_FILTER = True      # Prevents fighting trends (RESOLV/TAO disasters)
+ENABLE_MARKET_CONTEXT_FILTER = True       # Comprehensive context scoring  
+ENABLE_INTELLIGENT_SENTIMENT = True       # Fixes "fear = short" assumption
+ENABLE_CIRCUIT_BREAKER = True             # Prevents revenge trading
+
+# ===== BYBIT PUBLIC ENDPOINTS =====
+BYBIT_KLINES = "https://api.bybit.com/v5/market/kline"
+BYBIT_TICKERS = "https://api.bybit.com/v5/market/tickers"
+BYBIT_PRICE = "https://api.bybit.com/v5/market/tickers"
+COINGECKO_GLOBAL = "https://api.coingecko.com/api/v3/global"
+
+LOG_CSV = "./sirts_v10_signals_bybit.csv"
+
+# ===== CACHE FOR COINGECKO API =====
+DOMINANCE_CACHE = {"data": None, "timestamp": 0}
+DOMINANCE_CACHE_DURATION = 300  # 5 minutes cache
+SENTIMENT_CACHE = {"data": None, "timestamp": 0}
+SENTIMENT_CACHE_DURATION = 300  # 5 minutes cache
+
+# ===== NEW SAFEGUARDS =====
+STRICT_TF_AGREE = False         # aggressive mode: allow missing TFs to not block
+MAX_OPEN_TRADES = 200
+MAX_EXPOSURE_PCT = 0.20
+MIN_MARGIN_USD = 0.25
+MIN_SL_DISTANCE_PCT = 0.0015
+SYMBOL_BLACKLIST = set([])
+RECENT_SIGNAL_SIGNATURE_EXPIRE = 300
+recent_signals = {}
+
+# ===== RISK & CONFIDENCE =====
+BASE_RISK = 0.05   # AGGRESSIVE: 5% per trade default
+MAX_RISK  = 0.06
+MIN_RISK  = 0.01
+
+# ===== STATE =====
+last_trade_time      = {}
+open_trades          = []
+signals_sent_total   = 0
+signals_hit_total    = 0
+signals_fail_total   = 0
+signals_breakeven    = 0
+total_checked_signals= 0
+skipped_signals      = 0
+last_heartbeat       = time.time()
+last_summary         = time.time()
+volatility_pause_until= 0
+last_trade_result = {}
+
+STATS = {
+    "by_side": {"BUY": {"sent":0,"hit":0,"fail":0,"breakeven":0},
+                "SELL":{"sent":0,"hit":0,"fail":0,"breakeven":0}},
+    "by_tf": {tf: {"sent":0,"hit":0,"fail":0,"breakeven":0} for tf in TIMEFRAMES}
+}
+
+# ===== MOMENTUM INTEGRITY FRAMEWORK - NEW ADDITIONS =====
+symbol_failure_count = {}
+
+def trend_alignment_ok(symbol, direction, timeframe='4h'):
+    """NEW: Ensure trade aligns with dominant trend - OPTIONAL FILTER"""
+    if not ENABLE_TREND_ALIGNMENT_FILTER:
+        return True
+        
+    try:
+        df = get_klines(symbol, timeframe, 100)
+        if df is None or len(df) < 50:
+            return True  # Be permissive if data unavailable - PRESERVES EXISTING BEHAVIOR
             
-            if price > ema_1h_50 and price > ema_15m_20: 
-                return "BULLISH"
-            elif price < ema_1h_50 and price < ema_15m_20: 
-                return "BEARISH"
-            else: 
+        # Calculate EMAs for trend detection
+        ema_50 = df['close'].ewm(span=50).mean().iloc[-1]
+        ema_100 = df['close'].ewm(span=100).mean().iloc[-1]
+        current_price = df['close'].iloc[-1]
+        
+        if direction == "BUY":
+            # For LONG: Price should be above both EMAs (uptrend)
+            result = current_price > ema_50 and current_price > ema_100
+            if not result:
+                print(f"🔻 Trend alignment FAIL: {symbol} BUY signal in DOWNTREND (Price: {current_price:.4f} < EMA50: {ema_50:.4f})")
+            return result
+        elif direction == "SELL":  
+            # For SHORT: Price should be below both EMAs (downtrend)
+            result = current_price < ema_50 and current_price < ema_100
+            if not result:
+                print(f"🔻 Trend alignment FAIL: {symbol} SELL signal in UPTREND (Price: {current_price:.4f} > EMA50: {ema_50:.4f})")
+            return result
+            
+        return True
+    except Exception as e:
+        print(f"⚠️ Trend alignment check error for {symbol}: {e}")
+        return True  # Fail-safe: allow trade if check fails - PRESERVES EXISTING BEHAVIOR
+
+def market_context_ok(symbol, direction, confidence_pct):
+    """NEW: Comprehensive market context scoring - OPTIONAL FILTER"""  
+    if not ENABLE_MARKET_CONTEXT_FILTER:
+        return True
+        
+    try:
+        score = 0
+        max_score = 100
+        
+        # 1. Trend Alignment (40 points)
+        if trend_alignment_ok(symbol, direction):
+            score += 40
+            
+        # 2. Volume Confirmation (30 points)  
+        df_1h = get_klines(symbol, "1h", 50)
+        if df_1h is not None and len(df_1h) > 20:
+            current_vol = df_1h['volume'].iloc[-1]
+            avg_vol = df_1h['volume'].rolling(20).mean().iloc[-1]
+            if current_vol > avg_vol * 1.2:  # 20% above average volume
+                score += 30
+            elif current_vol > avg_vol:  # At least above average
+                score += 15
+                
+        # 3. Momentum Consistency (30 points)
+        df_15m = get_klines(symbol, "15m", 20)
+        if df_15m is not None and len(df_15m) > 10:
+            # Check if recent price action supports the direction
+            if direction == "BUY":
+                price_trend = df_15m['close'].iloc[-1] > df_15m['close'].iloc[-5]
+            else:
+                price_trend = df_15m['close'].iloc[-1] < df_15m['close'].iloc[-5]
+                
+            if price_trend:
+                score += 30
+            else:
+                score += 10  # Partial credit for counter-trend but high confidence
+                
+        # Required: Minimum 70% context score OR high confidence overrides weak context
+        context_ok = (score >= 70) or (confidence_pct > 80 and score >= 50)
+        
+        print(f"🔍 Market Context for {symbol} {direction}: {score}/100 - {'PASS' if context_ok else 'FAIL'}")
+        return context_ok
+        
+    except Exception as e:
+        print(f"⚠️ Market context error for {symbol}: {e}")
+        return True  # Fail-safe - PRESERVES EXISTING BEHAVIOR
+
+def intelligent_sentiment_check(sentiment, symbol, direction):
+    """NEW: Fix the 'fear = short' assumption - OPTIONAL FILTER"""
+    if not ENABLE_INTELLIGENT_SENTIMENT:
+        return "NEUTRAL"
+        
+    try:
+        # First, determine the actual market trend
+        df_4h = get_klines(symbol, "4h", 50)
+        if df_4h is None or len(df_4h) < 20:
+            return "NEUTRAL"  # Can't determine trend, be neutral
+            
+        current_price = df_4h['close'].iloc[-1]
+        ema_20 = df_4h['close'].ewm(span=20).mean().iloc[-1]
+        trend = "UPTREND" if current_price > ema_20 else "DOWNTREND"
+        
+        # Intelligent sentiment interpretation
+        if sentiment == "fear":
+            if trend == "UPTREND" and direction == "BUY":
+                return "POSITIVE"  # Fear in uptrend = buying opportunity
+            elif trend == "DOWNTREND" and direction == "SELL":  
+                return "POSITIVE"  # Fear in downtrend = momentum continuation
+            else:
+                print(f"🎭 Sentiment-Trend Conflict: FEAR sentiment but {direction} in {trend}")
+                return "CAUTION"   # Fear against trend = dangerous
+                
+        elif sentiment == "greed": 
+            if trend == "UPTREND" and direction == "BUY":
+                return "POSITIVE"  # Greed in uptrend = momentum
+            elif trend == "DOWNTREND" and direction == "SELL":
+                return "CAUTION"   # Greed in downtrend = potential reversal
+            else:
                 return "NEUTRAL"
-        except Exception as e:
-            logging.error(f"BTC direction error: {e}")
-            return "NEUTRAL"
-
-    @staticmethod
-    def is_trade_allowed(signal_side: SignalSide, btc_direction: str) -> bool:
-        """YOUR EXACT BTC ALIGNMENT FILTER"""
-        if btc_direction == "BULLISH": 
-            return signal_side == SignalSide.BUY
-        elif btc_direction == "BEARISH": 
-            return signal_side == SignalSide.SELL
-        else: 
-            return True
-
-    @staticmethod
-    def check_higher_tf_alignment(signal, higher_tf_data: pd.DataFrame) -> bool:
-        """YOUR EXACT HIGHER TIMEFRAME ALIGNMENT"""
-        if higher_tf_data is None or len(higher_tf_data) < 20:
-            return False
-        try:
-            current_price = signal.get('entry', 0) if isinstance(signal, dict) else signal.entry_price
-            higher_tf_ema_20 = higher_tf_data['close'].ewm(span=20).mean().iloc[-1]
-            higher_tf_ema_50 = higher_tf_data['close'].ewm(span=50).mean().iloc[-1]
-            
-            signal_side = SignalSide(signal['side']) if isinstance(signal, dict) else signal.side
-            
-            if signal_side == SignalSide.BUY:
-                return current_price > higher_tf_ema_20 and current_price > higher_tf_ema_50
-            else:
-                return current_price < higher_tf_ema_20 and current_price < higher_tf_ema_50
-        except Exception as e:
-            logging.error(f"Higher TF alignment error: {e}")
-            return False
-
-    @staticmethod
-    def check_momentum_confirmation(df: pd.DataFrame, signal_direction: SignalSide) -> bool:
-        """YOUR EXACT MOMENTUM CONFIRMATION"""
-        if df is None or len(df) < 3: 
-            return False
-        try:
-            current_candle = df.iloc[-1]
-            prev_candle = df.iloc[-2]
-            
-            if signal_direction == SignalSide.BUY:
-                return (current_candle['close'] > current_candle['open'] and 
-                        current_candle['close'] > prev_candle['close'])
-            else:
-                return (current_candle['close'] < current_candle['open'] and
-                        current_candle['close'] < prev_candle['close'])
-        except Exception as e:
-            logging.error(f"Momentum confirmation error: {e}")
-            return False
-
-    @staticmethod
-    def check_entry_zone_quality(df: pd.DataFrame, signal_direction: SignalSide) -> bool:
-        """YOUR EXACT ZONE QUALITY DETECTION"""
-        if df is None or len(df) < 15: 
-            return False
-        try:
-            recent_high = df['high'].tail(15).max()
-            recent_low = df['low'].tail(15).min()
-            current_price = df['close'].iloc[-1]
-            
-            if recent_high == recent_low: 
-                return False
                 
-            range_position = (current_price - recent_low) / (recent_high - recent_low)
-            
-            if signal_direction == SignalSide.BUY:
-                return range_position < 0.3
-            else:
-                return range_position > 0.7
-        except Exception as e:
-            logging.error(f"Zone quality error: {e}")
-            return False
+        return "NEUTRAL"
+    except Exception as e:
+        print(f"⚠️ Intelligent sentiment check error: {e}")
+        return "NEUTRAL"  # Fail-safe - PRESERVES EXISTING BEHAVIOR
 
-    @staticmethod
-    def detect_choppy_market(df: pd.DataFrame) -> bool:
-        """YOUR EXACT MARKET CONDITION FILTER"""
-        if df is None or len(df) < 25: 
-            return True
-        try:
-            high, low, close = df['high'], df['low'], df['close']
-            tr1 = high - low
-            tr2 = (high - close.shift(1)).abs()
-            tr3 = (low - close.shift(1)).abs()
-            true_range = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
-            atr = true_range.rolling(14).mean().iloc[-1]
-            
-            current_price = close.iloc[-1]
-            price_range_pct = (df['high'].tail(20).max() - df['low'].tail(20).min()) / current_price
-            
-            return (atr < (current_price * 0.002) and price_range_pct < 0.02)
-        except Exception as e:
-            logging.error(f"Choppy market detection error: {e}")
-            return True
-
-# ==================== YOUR EXACT OLD SMC CORE LOGIC ====================
-
-class OriginalSMCLogic:
-    """YOUR EXACT ORIGINAL SMC LOGIC - UNCHANGED"""
+def circuit_breaker_ok(symbol, direction):
+    """NEW: Prevent revenge trading on failing assets - OPTIONAL FILTER"""
+    if not ENABLE_CIRCUIT_BREAKER:
+        return True
+        
+    global symbol_failure_count
     
-    @staticmethod
-    def detect_swing_points(df: pd.DataFrame):
-        if df is None or len(df) < 5: 
-            return None
-        last = df.iloc[-1]; prev = df.iloc[-3:-1]
-        swing_high = last["high"] > prev["high"].max()
-        swing_low = last["low"] < prev["low"].min()
-        return swing_high, swing_low
-
-    @staticmethod
-    def detect_active_range(df: pd.DataFrame, lookback=10):
-        if df is None or len(df) < lookback:
-            return 0, 0
-        last = df.iloc[-lookback:]
-        return last["high"].max(), last["low"].min()
-
-    @staticmethod
-    def detect_sweep(df: pd.DataFrame):
-        if df is None or len(df) < 6: 
-            return False, False
-        last = df.iloc[-1]; prev = df.iloc[-5:-1]
-        return last["high"] > prev["high"].max(), last["low"] < prev["low"].min()
-
-    @staticmethod
-    def detect_bos_mss(df: pd.DataFrame):
-        hh, ll = OriginalSMCLogic.detect_sweep(df)
-        return hh, ll
-
-    @staticmethod
-    def detect_fvg(df: pd.DataFrame):
-        if df is None or len(df) < 3: 
-            return False, False
-        c1, c2, c3 = df.iloc[-3], df.iloc[-2], df.iloc[-1]
-        bull = c2["low"] > c1["high"] and c3["low"] > c2["high"]
-        bear = c2["high"] < c1["low"] and c3["high"] < c2["low"]
-        return bull, bear
-
-    @staticmethod
-    def detect_order_blocks(df: pd.DataFrame):
-        if df is None or len(df) < 3: 
-            return None, None, None
-        candle = df.iloc[-3]
-        if candle["close"] > candle["open"]:
-            return "bullish", candle["open"], candle["low"]
-        return "bearish", candle["high"], candle["open"]
-
-    @staticmethod
-    def generate_signal(df: pd.DataFrame, symbol: str, context=None):
-        """YOUR EXACT ORIGINAL SIGNAL GENERATION LOGIC"""
-        if context is None: 
-            context = {}
-        
-        if df is None or len(df) < 6: 
-            return None
-
-        tf = context.get("tf", "15m")
-
-        try:
-            last = df["close"].iloc[-1]
-
-            ob_type, ob_hi, ob_lo = OriginalSMCLogic.detect_order_blocks(df)
-            if ob_type is None: 
-                return None
-
-            bull_fvg, bear_fvg = OriginalSMCLogic.detect_fvg(df)
-            sweep_h, sweep_l = OriginalSMCLogic.detect_sweep(df)
-            bos_hh, bos_ll = OriginalSMCLogic.detect_bos_mss(df)
-
-            if not (bos_hh or bos_ll): 
-                return None
-
-            score = 0
-            reasons = []
-
-            if ob_type == "bullish": 
-                score += 2
-                reasons.append("OB Bull +2")
-            else: 
-                score += 2
-                reasons.append("OB Bear +2")
-
-            if bull_fvg: 
-                score += 2
-                reasons.append("FVG Bull +2")
-            elif bear_fvg: 
-                score += 2
-                reasons.append("FVG Bear +2")
-
-            score += 2
-            reasons.append("BOS +2")
-            if sweep_h or sweep_l: 
-                score += 1
-                reasons.append("Sweep +1")
-            else: 
-                reasons.append("No Sweep +0")
-
-            side = "BUY" if ob_type == "bullish" else "SELL"
-
-            # Use OLD SIMPLE ATR TP/SL
-            entry = float(last)
-            sl, tp1, tp2, tp3 = OldSimpleTPSL.calculate_old_tp_sl(df, symbol, side, entry, context)
-
-            return {
-                "symbol": symbol,
-                "side": side,
-                "entry": entry,
-                "sl": sl,
-                "tp1": tp1,
-                "tp2": tp2,
-                "tp3": tp3,
-                "score": score,
-                "reason": "Set B SMC Signal + OLD TP/SL",
-                "reason_list": reasons,
-                "timeframe": tf
-            }
-        except Exception as e:
-            logging.error(f"Signal generation error for {symbol}: {e}")
-            return None
-
-# ==================== OLD SIMPLE ATR TP/SL SYSTEM ====================
-
-class OldSimpleTPSL:
-    """YOUR EXACT OLD SIMPLE ATR TP/SL SYSTEM"""
+    key = (symbol, direction)
+    failures = symbol_failure_count.get(key, 0)
     
-    @staticmethod
-    def calculate_old_tp_sl(df, symbol, side, entry, context):
-        """YOUR EXACT OLD ATR-BASED TP/SL"""
-        try:
-            # OLD ATR CALCULATION
-            atr_val = OldSimpleTPSL.old_atr(df, 14).iloc[-1] if df is not None and len(df) >= 14 else None
-            
-            # OLD TP/SL MULTIPLIERS
-            tp_mult, sl_mult = 0.8, 1.0
-            
-            if atr_val and atr_val > 0:
-                if side == "BUY":
-                    sl = entry - sl_mult * atr_val
-                    tp1 = entry + tp_mult * atr_val
-                    tp2 = entry + tp_mult * 1.5 * atr_val
-                    tp3 = entry + tp_mult * 2.5 * atr_val
-                else:
-                    sl = entry + sl_mult * atr_val
-                    tp1 = entry - tp_mult * atr_val
-                    tp2 = entry - tp_mult * 1.5 * atr_val
-                    tp3 = entry - tp_mult * 2.5 * atr_val
-            else:
-                # OLD FALLBACK TO PERCENTAGE
-                if side == "BUY":
-                    sl = entry * 0.998
-                    tp1 = entry * 1.004
-                    tp2 = entry * 1.008  
-                    tp3 = entry * 1.012
-                else:
-                    sl = entry * 1.002
-                    tp1 = entry * 0.996
-                    tp2 = entry * 0.992
-                    tp3 = entry * 0.988
-
-            # OLD SL VALIDATION
-            if sl == entry:
-                sl = entry - entry * 0.002 if side == "BUY" else entry + entry * 0.002
-
-            return sl, tp1, tp2, tp3
-        except Exception as e:
-            logging.error(f"TP/SL calculation error: {e}")
-            # Fallback values
-            if side == "BUY":
-                return entry * 0.998, entry * 1.004, entry * 1.008, entry * 1.012
-            else:
-                return entry * 1.002, entry * 0.996, entry * 0.992, entry * 0.988
-
-    @staticmethod
-    def old_atr(df: pd.DataFrame, period=14):
-        """YOUR EXACT OLD ATR CALCULATION"""
-        if df is None or len(df) < period:
-            return pd.Series([0] * len(df) if df is not None else [0])
+    # If 2+ recent failures, block this symbol-direction for 6 hours
+    if failures >= 2:
+        print(f"🚫 Circuit breaker active for {symbol} {direction}: {failures} recent failures")
+        return False
         
-        high, low, close = df["high"], df["low"], df["close"]
-        tr = pd.DataFrame({
-            "h-l": high - low,
-            "h-pc": (high - close.shift(1)).abs(),
-            "l-pc": (low - close.shift(1)).abs()
-        }).max(axis=1)
-        return tr.rolling(period, min_periods=1).mean()
+    return True
 
-# ==================== ENHANCED DATA MODELS ====================
-
-@dataclass
-class TradingSignal:
-    """Enhanced signal with OLD scoring + new tracking"""
-    symbol: str
-    side: SignalSide
-    entry_price: float
-    stop_loss: float
-    take_profit_1: float
-    take_profit_2: float
-    take_profit_3: float
-    timestamp: datetime.datetime
-    timeframe: str
-    
-    # OLD scoring system
-    base_score: int  # OLD SMC score (4-7)
-    final_score: int  # OLD base_score + 5 bonus
-    filters_passed: List[str]
-    rejection_reasons: List[str]
-    
-    # OLD winner filters tracking
-    winner_filters_passed: List[str]
-    winner_filters_failed: List[str]
-    
-    # Metadata
-    signal_id: str
-    version: str = "3.1-OLD-FILTERS"
-
-# ==================== OLD-STYLE FILTER APPLICATION ====================
-
-class OldFilterApplicator:
-    """APPLIES FILTERS EXACTLY LIKE OLD CODE"""
-    
-    @staticmethod
-    async def apply_old_filters(old_signal: Dict, df: pd.DataFrame, context: Dict, config: ScannerConfig) -> Tuple[bool, List[str], List[str], List[str]]:
-        """EXACT OLD CODE FILTER LOGIC"""
-        winner_filters_passed = []
-        winner_filters_failed = []
-        filters_failed_reasons = []
-        
-        signal_side = SignalSide.BUY if old_signal['side'] == 'BUY' else SignalSide.SELL
-        tf = context.get('tf', '15m')
-        
-        # OLD-STYLE: Start with filters_passed = True, set to False if any critical filter fails
-        filters_passed = True
-        
-        # 1. BTC DIRECTION FILTER - OLD STYLE
-        if config.REQUIRE_BTC_ALIGNMENT:
-            btc_direction = context.get('btc_direction', 'NEUTRAL')
-            if OriginalWinnerFilters.is_trade_allowed(signal_side, btc_direction):
-                winner_filters_passed.append("BTC_ALIGNMENT")
-            else:
-                filters_passed = False
-                filters_failed_reasons.append(f"BTC {btc_direction} misalignment")
-                winner_filters_failed.append("BTC_MISALIGNMENT")
-                logging.info(f"⏸️ OLD-STYLE Blocked: {signal_side.value} vs BTC {btc_direction}")
-        
-        # Continue checking other filters ONLY if filters_passed is still True
-        if filters_passed and config.REQUIRE_HIGHER_TF_ALIGNMENT:
-            higher_tf_data = context.get('df_15m')
-            if OriginalWinnerFilters.check_higher_tf_alignment(old_signal, higher_tf_data):
-                winner_filters_passed.append("HIGHER_TF_ALIGNMENT")
-            else:
-                filters_passed = False
-                filters_failed_reasons.append("Higher TF misalignment")
-                winner_filters_failed.append("HIGHER_TF_MISALIGNMENT")
-                logging.info(f"⏸️ OLD-STYLE Blocked: Higher TF misalignment")
-        
-        # 3. MOMENTUM CONFIRMATION - OLD APPLICABILITY (skip for 1m/3m)
-        if (filters_passed and config.REQUIRE_MOMENTUM_CONFIRMATION and 
-            tf not in ["1m", "3m"]):  # OLD: Skip for 1m, 3m
-            if OriginalWinnerFilters.check_momentum_confirmation(df, signal_side):
-                winner_filters_passed.append("MOMENTUM")
-            else:
-                filters_passed = False
-                filters_failed_reasons.append("No momentum confirmation")
-                winner_filters_failed.append("WEAK_MOMENTUM")
-                logging.info(f"⏸️ OLD-STYLE Blocked: No momentum confirmation")
-        
-        # 4. ZONE QUALITY
-        if filters_passed and config.REQUIRE_ZONE_QUALITY:
-            if OriginalWinnerFilters.check_entry_zone_quality(df, signal_side):
-                winner_filters_passed.append("ZONE_QUALITY")
-            else:
-                filters_passed = False
-                filters_failed_reasons.append("Poor entry zone")
-                winner_filters_failed.append("POOR_ZONE")
-                logging.info(f"⏸️ OLD-STYLE Blocked: Poor entry zone")
-        
-        # 5. CHOPPY MARKET FILTER
-        if filters_passed and config.AVOID_CHOPPY_MARKETS:
-            if not OriginalWinnerFilters.detect_choppy_market(df):
-                winner_filters_passed.append("TRENDING_MARKET")
-            else:
-                filters_passed = False
-                filters_failed_reasons.append("Choppy market")
-                winner_filters_failed.append("CHOPPY_MARKET")
-                logging.info(f"⏸️ OLD-STYLE Blocked: Choppy market")
-        
-        return filters_passed, winner_filters_passed, winner_filters_failed, filters_failed_reasons
-
-# ==================== TRADE MONITORING SYSTEM ====================
-
-class TradeMonitor:
-    """Advanced monitoring with OLD signal handling"""
-    
-    def __init__(self, scanner):
-        self.scanner = scanner
-        self.open_signals = {}
-        self.closed_trades = []
-        self.all_signals = []
-        self.last_summary_time = time.time()
-        self.recent_sl = defaultdict(lambda: deque())
-        
-    async def add_signal(self, signal: TradingSignal):
-        """Add OLD-style signal to monitoring"""
-        self.open_signals[signal.signal_id] = signal
-        self.all_signals.append({
-            'signal': signal,
-            'status': 'OPEN',
-            'added_time': datetime.datetime.utcnow()
-        })
-        logging.info(f"📈 OLD Monitoring: {signal.symbol} {signal.side.value} | Final Score: {signal.final_score}")
-        
-    def record_sl_hit(self, symbol: str, lookback_minutes=30):
-        """YOUR EXACT OLD SL-CLUSTER LOGIC"""
-        now = time.time()
-        dq = self.recent_sl[symbol]
-        dq.append(now)
-        cutoff = now - lookback_minutes * 60
-        while dq and dq[0] < cutoff: 
-            dq.popleft()
-        
-    def deprioritized(self, symbol: str, threshold=3, lookback=30):
-        """YOUR EXACT OLD DEPRIORITIZATION LOGIC"""
-        dq = self.recent_sl[symbol]
-        now = time.time()
-        cutoff = now - lookback * 60
-        while dq and dq[0] < cutoff: 
-            dq.popleft()
-        return len(dq) >= threshold
-
-    async def monitor_open_signals(self):
-        """Monitor OLD signals"""
-        if not self.open_signals: 
-            return
-        
-        signals_to_remove = []
-        
-        for signal_id, signal in self.open_signals.items():
-            try:
-                ticker = await self.scanner.exchange.fetch_ticker(signal.symbol)
-                current_price = ticker['last']
-                
-                status = await self.check_signal_status(signal, current_price)
-                
-                if status != "OPEN":
-                    await self._process_closed_signal(signal, status, current_price)
-                    signals_to_remove.append(signal_id)
-                    if "SL" in status:
-                        self.record_sl_hit(signal.symbol)
-                    
-            except Exception as e:
-                logging.error(f"Error monitoring {signal.symbol}: {e}")
-        
-        for signal_id in signals_to_remove:
-            if signal_id in self.open_signals:
-                del self.open_signals[signal_id]
-
-    async def check_signal_status(self, signal: TradingSignal, current_price: float):
-        """Check TP/SL hits for OLD signals"""
-        try:
-            if signal.side == SignalSide.BUY:
-                if current_price >= signal.take_profit_3: 
-                    return "TP3_HIT"
-                elif current_price >= signal.take_profit_2: 
-                    return "TP2_HIT"
-                elif current_price >= signal.take_profit_1: 
-                    return "TP1_HIT"
-                elif current_price <= signal.stop_loss: 
-                    return "SL_HIT"
-            else:
-                if current_price <= signal.take_profit_3: 
-                    return "TP3_HIT"
-                elif current_price <= signal.take_profit_2: 
-                    return "TP2_HIT"
-                elif current_price <= signal.take_profit_1: 
-                    return "TP1_HIT"
-                elif current_price >= signal.stop_loss: 
-                    return "SL_HIT"
-            return "OPEN"
-        except Exception as e:
-            logging.error(f"Signal status check error: {e}")
-            return "OPEN"
-
-    async def _process_closed_signal(self, signal: TradingSignal, status: str, close_price: float):
-        """Process closed OLD signal"""
-        try:
-            if signal.side == SignalSide.BUY:
-                pnl_pct = (close_price - signal.entry_price) / signal.entry_price * 100
-            else:
-                pnl_pct = (signal.entry_price - close_price) / signal.entry_price * 100
-            
-            trade_record = {
-                'signal_id': signal.signal_id,
-                'symbol': signal.symbol,
-                'side': signal.side.value,
-                'entry_price': signal.entry_price,
-                'close_price': close_price,
-                'pnl_pct': pnl_pct,
-                'status': status,
-                'entry_time': signal.timestamp,
-                'exit_time': datetime.datetime.utcnow(),
-                'timeframe': signal.timeframe,
-                'final_score': signal.final_score,
-                'winner_filters_passed': signal.winner_filters_passed
-            }
-            
-            self.closed_trades.append(trade_record)
-            
-            # Update all_signals
-            for sig_data in self.all_signals:
-                if sig_data['signal'].signal_id == signal.signal_id:
-                    sig_data['status'] = status
-                    sig_data['close_price'] = close_price
-                    sig_data['pnl_pct'] = pnl_pct
-                    sig_data['exit_time'] = datetime.datetime.utcnow()
-                    break
-            
-            await self._send_trade_update(signal, status, close_price, pnl_pct)
-            logging.info(f"🎯 OLD Trade closed: {signal.symbol} {status} | P&L: {pnl_pct:.2f}% | Score: {signal.final_score}")
-        except Exception as e:
-            logging.error(f"Process closed signal error: {e}")
-
-    async def _send_trade_update(self, signal: TradingSignal, status: str, close_price: float, pnl_pct: float):
-        """Send OLD-style trade update"""
-        try:
-            emoji = "🟢" if "TP" in status else "🔴"
-            winner_info = f"✅ Filters: {', '.join(signal.winner_filters_passed)}\n" if signal.winner_filters_passed else ""
-            
-            message = f"""
-{emoji} **OLD-STYLE TRADE UPDATE** {emoji}
-
-Symbol: {signal.symbol}
-Side: {signal.side.value}
-Status: {status}
-
-Entry: {signal.entry_price:.6f}
-Exit: {close_price:.6f}
-P&L: {pnl_pct:+.2f}%
-
-{winner_info}
-OLD Final Score: {signal.final_score}
-"""
-            await send_telegram_message(message)
-        except Exception as e:
-            logging.error(f"Send trade update error: {e}")
-
-    async def send_performance_summary(self):
-        """Send 2-hour performance summary"""
-        try:
-            now = time.time()
-            if now - self.last_summary_time < 7200:  # 2 hours
-                return False
-                
-            self.last_summary_time = now
-            
-            # Get signals from last 2 hours
-            two_hours_ago = datetime.datetime.utcnow() - datetime.timedelta(hours=2)
-            recent_signals = [s for s in self.all_signals if s['added_time'] >= two_hours_ago]
-            
-            if not recent_signals:
-                return True
-                
-            # Calculate statistics
-            open_signals = [s for s in recent_signals if s['status'] == 'OPEN']
-            closed_signals = [s for s in recent_signals if s['status'] != 'OPEN']
-            winning_trades = [s for s in closed_signals if s.get('pnl_pct', 0) > 0]
-            
-            total_signals = len(recent_signals)
-            win_rate = len(winning_trades) / len(closed_signals) * 100 if closed_signals else 0
-            avg_final_score = sum(s['signal'].final_score for s in recent_signals) / total_signals if total_signals else 0
-
-            # Create OLD-style summary message
-            message = f"""
-📊 **OLD-STYLE 2-HOUR PERFORMANCE** 📊
-
-⏰ Period: Last 2 hours
-📈 Total Signals: {total_signals}
-🟢 Open Signals: {len(open_signals)}
-🔒 Closed Signals: {len(closed_signals)}
-🎯 Win Rate: {win_rate:.1f}%
-⭐ Avg Final Score: {avg_final_score:.1f}
-
-📋 **RECENT OLD-STYLE SIGNALS:**
-"""
-            
-            # Add recent signals details
-            for i, sig_data in enumerate(recent_signals[-5:], 1):
-                signal = sig_data['signal']
-                status = sig_data['status']
-                pnl = sig_data.get('pnl_pct', 0)
-                
-                status_emoji = "🟢" if "TP" in status else "🔴" if status == "SL_HIT" else "🟡"
-                pnl_str = f"{pnl:+.2f}%" if status != "OPEN" else "OPEN"
-                
-                winner_info = f" ✅{len(signal.winner_filters_passed)}" if signal.winner_filters_passed else ""
-                
-                message += f"{i}. {status_emoji} {signal.symbol} {signal.side.value} | Final: {signal.final_score}{winner_info} | {pnl_str}\n"
-            
-            await send_telegram_message(message)
-            logging.info("📊 OLD-STYLE 2-hour performance summary sent")
-            return True
-        except Exception as e:
-            logging.error(f"Performance summary error: {e}")
-            return False
-
-    def get_performance_stats(self):
-        """Get OLD-style performance statistics"""
-        try:
-            if not self.closed_trades:
-                return {"total_trades": 0, "win_rate": 0, "avg_pnl": 0, "total_pnl": 0}
-            
-            winning_trades = [t for t in self.closed_trades if t['pnl_pct'] > 0]
-            total_pnl = sum(t['pnl_pct'] for t in self.closed_trades)
-            
-            return {
-                'total_trades': len(self.closed_trades),
-                'winning_trades': len(winning_trades),
-                'win_rate': len(winning_trades) / len(self.closed_trades) * 100 if self.closed_trades else 0,
-                'avg_pnl': total_pnl / len(self.closed_trades) if self.closed_trades else 0,
-                'total_pnl': total_pnl
-            }
-        except Exception as e:
-            logging.error(f"Performance stats error: {e}")
-            return {"total_trades": 0, "win_rate": 0, "avg_pnl": 0, "total_pnl": 0}
-
-# ==================== ULTIMATE HYBRID SCANNER ====================
-
-class UltimateHybridScanner:
-    """PERFECT FUSION: OLD FILTERS + NEW ARCHITECTURE"""
-    
-    def __init__(self, config: ScannerConfig):
-        self.config = config
-        self.trade_monitor = TradeMonitor(self)
-        self.exchange = None
-        self.signal_cooldown = {}
-        
-        # YOUR EXACT OLD COMPONENTS
-        self.winner_filters = OriginalWinnerFilters()
-        self.smc_logic = OriginalSMCLogic()
-        self.old_tpsl = OldSimpleTPSL()
-        self.old_filters = OldFilterApplicator()
-        
-        self._setup_logging()
-    
-    def _setup_logging(self):
-        """Enhanced logging"""
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s | %(levelname)s | %(message)s',
-            handlers=[
-                logging.StreamHandler()
-            ]
-        )
-        logging.info("🚀 ULTIMATE HYBRID SCANNER v3.1 - OLD FILTERS INITIALIZED")
-        logging.info("✅ Your exact old filter strictness & scoring")
-        logging.info("✅ Old momentum filter applicability (skip 1m/3m)")
-        logging.info("✅ Old scoring: base SMC + 5 bonus")
-        logging.info("✅ Old simple ATR TP/SL system")
-
-    async def initialize_exchange(self):
-        """Initialize with your exchange settings"""
-        try:
-            self.exchange = ccxt.okx({
-                "enableRateLimit": True,
-            })
-            await self.exchange.load_markets()
-            logging.info("✅ OKX exchange initialized successfully")
-            return True
-        except Exception as e:
-            logging.error(f"❌ Exchange initialization failed: {e}")
-            return False
-
-    async def fetch_ohlcv_data(self, symbol: str, timeframe: str, limit: int = 200) -> Optional[pd.DataFrame]:
-        """YOUR EXACT OHLCV FETCHING"""
-        try:
-            ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-            if not ohlcv or len(ohlcv) < 20: 
-                return None
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            return df
-        except Exception as e:
-            logging.debug(f"Could not fetch {symbol} {timeframe}: {e}")
-            return None
-
-    async def get_btc_context(self) -> Dict[str, Any]:
-        """YOUR EXACT BTC CONTEXT"""
-        try:
-            btc_15m = await self.fetch_ohlcv_data('BTC/USDT', '15m', 100)
-            btc_1h = await self.fetch_ohlcv_data('BTC/USDT', '1h', 100)
-            btc_direction = self.winner_filters.get_btc_direction(btc_15m, btc_1h)
-            return {
-                'btc_direction': btc_direction,
-                'df_15m': btc_15m,
-                'df_1h': btc_1h
-            }
-        except Exception as e:
-            logging.error(f"Error getting BTC context: {e}")
-            return {'btc_direction': 'NEUTRAL'}
-
-    async def scan_symbol(self, symbol: str) -> List[TradingSignal]:
-        """OLD-STYLE SCANNING WITH OLD FILTER STRICTNESS"""
-        signals = []
-        
-        try:
-            # Get context for winner filters
-            context = await self.get_btc_context()
-            
-            # Define timeframes to scan (OLD STYLE)
-            timeframes = ["1m", "3m", "5m", "15m", "30m"]
-            
-            for tf in timeframes:
-                # Check cooldown (OLD STYLE)
-                cooldown_key = f"{symbol}_{tf}"
-                if cooldown_key in self.signal_cooldown:
-                    if time.time() - self.signal_cooldown[cooldown_key] < self.config.COOLDOWN_MINUTES * 60:
-                        continue
-                
-                # Check SL cluster (OLD STYLE)
-                if self.trade_monitor.deprioritized(symbol):
-                    continue
-                
-                # Fetch data
-                df = await self.fetch_ohlcv_data(symbol, tf)
-                if df is None: 
-                    continue
-                
-                # Add context
-                scan_context = context.copy()
-                scan_context['tf'] = tf
-                scan_context['current_price'] = df['close'].iloc[-1]
-                
-                # Get higher timeframe data for alignment (OLD STYLE)
-                if tf in ["1m", "3m", "5m"]:
-                    df_15m = await self.fetch_ohlcv_data(symbol, '15m', 100)
-                    df_1h = await self.fetch_ohlcv_data(symbol, '1h', 100)
-                    scan_context['df_15m'] = df_15m
-                    scan_context['df_1h'] = df_1h
-                
-                # GENERATE SIGNAL USING YOUR EXACT OLD LOGIC
-                old_signal = self.smc_logic.generate_signal(df, symbol, scan_context)
-                if not old_signal: 
-                    continue
-                
-                # APPLY YOUR EXACT OLD FILTER STRICTNESS
-                hybrid_signal = await self._apply_old_style_filters(old_signal, df, scan_context)
-                if hybrid_signal:
-                    if await self._validate_signal(hybrid_signal):
-                        signals.append(hybrid_signal)
-                        self.signal_cooldown[cooldown_key] = time.time()
-                        await self.trade_monitor.add_signal(hybrid_signal)
-                        
-                        # Send signal notification
-                        await self._send_signal_notification(hybrid_signal, old_signal)
-                        
-                        logging.info(f"🏆 OLD-STYLE SIGNAL: {symbol} {hybrid_signal.side.value} "
-                                   f"| Base: {hybrid_signal.base_score} "
-                                   f"| Final: {hybrid_signal.final_score} "
-                                   f"| Filters: {len(hybrid_signal.winner_filters_passed)}")
-        
-        except Exception as e:
-            logging.error(f"Error scanning {symbol}: {e}")
-            
-        return signals
-
-    async def _apply_old_style_filters(self, old_signal: Dict, df: pd.DataFrame, context: Dict) -> Optional[TradingSignal]:
-        """APPLY FILTERS EXACTLY LIKE OLD CODE"""
-        try:
-            # OLD-STYLE FILTER APPLICATION
-            filters_passed, winner_filters_passed, winner_filters_failed, filter_reasons = (
-                await self.old_filters.apply_old_filters(old_signal, df, context, self.config)
-            )
-            
-            # OLD-STYLE: Only proceed if filters_passed is True
-            if not filters_passed:
-                return None
-            
-            # OLD SCORING SYSTEM: base_score + 5 fixed bonus
-            base_score = old_signal['score']  # OLD SMC score (4-7)
-            final_score = base_score + self.config.WINNER_BONUS  # OLD: Fixed +5 bonus
-            
-            # Create enhanced signal with OLD scoring
-            enhanced_signal = TradingSignal(
-                symbol=old_signal['symbol'],
-                side=SignalSide.BUY if old_signal['side'] == 'BUY' else SignalSide.SELL,
-                entry_price=old_signal['entry'],
-                stop_loss=old_signal['sl'],
-                take_profit_1=old_signal['tp1'],
-                take_profit_2=old_signal['tp2'],
-                take_profit_3=old_signal['tp3'],
-                timestamp=datetime.datetime.utcnow(),
-                timeframe=old_signal['timeframe'],
-                base_score=base_score,  # OLD SMC score
-                final_score=final_score,  # OLD final score
-                filters_passed=old_signal['reason_list'],
-                rejection_reasons=filter_reasons,
-                winner_filters_passed=winner_filters_passed,
-                winner_filters_failed=winner_filters_failed,
-                signal_id=f"{old_signal['symbol']}_{old_signal['timeframe']}_{int(time.time())}"
-            )
-            
-            logging.info(f"✅ OLD FILTERS PASSED: {len(winner_filters_passed)} - Score: {base_score} + {self.config.WINNER_BONUS} = {final_score}")
-            return enhanced_signal
-        except Exception as e:
-            logging.error(f"Apply old filters error: {e}")
-            return None
-
-    async def _send_signal_notification(self, hybrid_signal: TradingSignal, old_signal: Dict):
-        """Send signal notification in OLD STYLE"""
-        try:
-            message = f"""
-🏆 **OLD-STYLE INSTITUTIONAL SIGNAL** 🏆
-
-Symbol: {hybrid_signal.symbol}
-Side: {hybrid_signal.side.value}
-Timeframe: {hybrid_signal.timeframe}
-Entry: {hybrid_signal.entry_price:.6f}
-
-Risk Management:
-SL: {hybrid_signal.stop_loss:.6f}
-TP1: {hybrid_signal.take_profit_1:.6f}
-TP2: {hybrid_signal.take_profit_2:.6f}
-TP3: {hybrid_signal.take_profit_3:.6f}
-
-OLD SCORING:
-Base SMC: {hybrid_signal.base_score}
-Winner Bonus: +{self.config.WINNER_BONUS}
-FINAL SCORE: {hybrid_signal.final_score}
-
-Filters: {', '.join(hybrid_signal.winner_filters_passed)}
-Original Reasons: {', '.join(old_signal['reason_list'])}
-"""
-            await send_telegram_message(message)
-        except Exception as e:
-            logging.error(f"Send signal notification error: {e}")
-
-    async def _validate_signal(self, signal: TradingSignal) -> bool:
-        """Final validation"""
-        try:
-            # Check if we're already monitoring this symbol
-            for open_signal in self.trade_monitor.open_signals.values():
-                if open_signal.symbol == signal.symbol:
-                    logging.info(f"⏸️ Already monitoring {signal.symbol}")
-                    return False
-                    
-            return True
-        except Exception as e:
-            logging.error(f"Signal validation error: {e}")
-            return False
-
-    async def get_top_symbols(self) -> List[str]:
-        """Get top symbols with your filters"""
-        try:
-            tickers = await self.exchange.fetch_tickers()
-            symbols_data = []
-            
-            for symbol, ticker in tickers.items():
-                if not symbol.endswith('/USDT'): 
-                    continue
-                
-                volume_usdt = ticker.get('baseVolume', 0) * ticker.get('last', 0)
-                if volume_usdt < self.config.MIN_VOLUME_USDT: 
-                    continue
-                
-                bid = ticker.get('bid', 0)
-                ask = ticker.get('ask', 0)
-                if bid == 0 or ask == 0: 
-                    continue
-                
-                spread_pct = (ask - bid) / bid
-                if spread_pct > self.config.MAX_SPREAD_PCT: 
-                    continue
-                
-                symbols_data.append({'symbol': symbol, 'volume': volume_usdt})
-                    
-            symbols_data.sort(key=lambda x: x['volume'], reverse=True)
-            top_symbols = [s['symbol'] for s in symbols_data[:self.config.TOP_N_SYMBOLS]]
-            
-            logging.info(f"📊 Selected {len(top_symbols)} elite symbols")
-            return top_symbols
-            
-        except Exception as e:
-            logging.error(f"Error getting top symbols: {e}")
-            return []
-
-    async def run_scan_cycle(self):
-        """Enhanced scanning with performance tracking"""
-        try:
-            logging.info("🔍 Starting OLD-STYLE scan cycle...")
-            
-            # Get top symbols
-            symbols = await self.get_top_symbols()
-            if not symbols:
-                logging.warning("No symbols to scan")
-                return
-                
-            all_signals = []
-            
-            # Scan each symbol
-            for symbol in symbols:
-                try:
-                    signals = await self.scan_symbol(symbol)
-                    all_signals.extend(signals)
-                    await asyncio.sleep(0.1)  # Rate limit
-                except Exception as e:
-                    logging.error(f"Error scanning {symbol}: {e}")
-                    continue
-            
-            # Log summary
-            if all_signals:
-                logging.info(f"📈 OLD-STYLE scan complete: {len(all_signals)} ELITE signals found")
-            else:
-                logging.info("📈 OLD-STYLE scan complete: No elite signals found")
-                
-        except Exception as e:
-            logging.error(f"OLD-STYLE scan cycle error: {e}")
-
-    async def start_continuous_scanning(self):
-        """Ultimate continuous scanning"""
-        logging.info("🔄 Starting OLD-STYLE continuous scanning...")
-        
-        startup_msg = (
-            "🚀 **OLD-STYLE HYBRID SCANNER STARTED** 🚀\n"
-            "✅ Your exact old SMC logic preserved\n"
-            "✅ All winner filters with OLD strictness\n" 
-            "✅ Old simple ATR TP/SL system active\n"
-            "✅ Momentum filter skips 1m/3m (OLD behavior)\n"
-            "✅ Old scoring: base + 5 fixed bonus\n"
-            "✅ Advanced monitoring & performance tracking\n"
-            "🎯 Target: HIGH WIN RATE WITH PROVEN OLD LOGIC"
-        )
-        await send_telegram_message(startup_msg)
-        
-        try:
-            while True:
-                start_time = time.time()
-                
-                # Run elite scan cycle
-                await self.run_scan_cycle()
-                
-                # Monitor open signals
-                await self.trade_monitor.monitor_open_signals()
-                
-                # Send performance summary every 2 hours
-                await self.trade_monitor.send_performance_summary()
-                
-                elapsed = time.time() - start_time
-                sleep_time = max(1, self.config.SCAN_INTERVAL - elapsed)
-                await asyncio.sleep(sleep_time)
-                
-        except Exception as e:
-            logging.error(f"OLD-STYLE scanning error: {e}")
-            await asyncio.sleep(60)
-
-    async def cleanup(self):
-        """Cleanup resources"""
-        try:
-            if self.exchange:
-                await self.exchange.close()
-            logging.info("🧹 OLD-STYLE scanner cleanup completed")
-        except Exception as e:
-            logging.error(f"Cleanup error: {e}")
-
-# ==================== TELEGRAM NOTIFICATIONS ====================
-
-async def send_telegram_message(message: str):
-    """Your exact Telegram function - FIXED"""
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    
-    if not token or not chat_id: 
-        print(f"📱 TELEGRAM: {message}")
+def update_circuit_breaker(symbol, direction, success):
+    """NEW: Update circuit breaker based on trade outcome"""
+    if not ENABLE_CIRCUIT_BREAKER:
         return
         
-    def escape_html(msg: str) -> str:
-        if not msg: 
-            return "-"
-        return str(msg).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    global symbol_failure_count
     
-    safe_msg = escape_html(message)
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    async with httpx.AsyncClient() as client:
-        try:
-            await client.post(url, json={
-                "chat_id": chat_id, 
-                "text": safe_msg, 
-                "parse_mode": "HTML"
-            })
-        except Exception as e:
-            logging.error(f"Telegram failed: {e}")
-
-# ==================== WEB API SERVER ====================
-
-# Global scanner instance
-scanner: Optional[UltimateHybridScanner] = None
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Manage scanner lifecycle"""
-    global scanner
-    config = ScannerConfig()
-    scanner = UltimateHybridScanner(config)
-    success = await scanner.initialize_exchange()
+    key = (symbol, direction)
     
     if success:
-        background_tasks = BackgroundTasks()
-        background_tasks.add_task(scanner.start_continuous_scanning)
-    
-    yield
-    
-    if scanner:
-        await scanner.cleanup()
+        # Reset on success
+        symbol_failure_count[key] = 0
+        print(f"🟢 Circuit breaker: {symbol} {direction} reset to 0 failures")
+    else:
+        # Increment on failure
+        symbol_failure_count[key] = symbol_failure_count.get(key, 0) + 1
+        print(f"🔴 Circuit breaker: {symbol} {direction} failures = {symbol_failure_count[key]}")
+# ===== END MOMENTUM INTEGRITY FRAMEWORK =====
 
-app = FastAPI(title="Ultimate Hybrid Scanner v3.1 - OLD FILTERS", version="3.1.0", lifespan=lifespan)
-
-# API Routes
-class SignalResponse(BaseModel):
-    symbol: str
-    side: str
-    entry_price: float
-    base_score: int
-    final_score: int
-    timeframe: str
-    winner_filters_passed: List[str]
-    timestamp: datetime.datetime
-
-class PerformanceStats(BaseModel):
-    total_trades: int
-    win_rate: float
-    avg_pnl: float
-    open_signals: int
-
-@app.get("/")
-async def root():
-    return {"status": "ULTIMATE HYBRID SCANNER v3.1 - OLD FILTERS - RUNNING"}
-
-@app.get("/signals", response_model=List[SignalResponse])
-async def get_current_signals():
-    if not scanner: 
-        return []
-    signals = []
-    for signal in scanner.trade_monitor.open_signals.values():
-        signals.append(SignalResponse(
-            symbol=signal.symbol,
-            side=signal.side.value,
-            entry_price=signal.entry_price,
-            base_score=signal.base_score,
-            final_score=signal.final_score,
-            timeframe=signal.timeframe,
-            winner_filters_passed=signal.winner_filters_passed,
-            timestamp=signal.timestamp
-        ))
-    return signals
-
-@app.get("/performance", response_model=PerformanceStats)
-async def get_performance():
-    if not scanner:
-        return PerformanceStats(total_trades=0, win_rate=0, avg_pnl=0, open_signals=0)
-    stats = scanner.trade_monitor.get_performance_stats()
-    return PerformanceStats(
-        total_trades=stats['total_trades'],
-        win_rate=stats['win_rate'],
-        avg_pnl=stats['avg_pnl'],
-        open_signals=len(scanner.trade_monitor.open_signals)
-    )
-
-@app.post("/scan-now")
-async def trigger_manual_scan():
-    """Trigger manual OLD-style scan cycle"""
-    if not scanner:
-        raise HTTPException(status_code=500, detail="Scanner not initialized")
-    
-    asyncio.create_task(scanner.run_scan_cycle())
-    return {"status": "OLD-style scan triggered"}
-
-# ==================== MAIN EXECUTION ====================
-
-async def main():
-    """Ultimate main execution with OLD filters"""
+# ===== HELPERS =====
+def send_message(text):
+    if not BOT_TOKEN or not CHAT_ID:
+        print("Telegram not configured:", text)
+        return False
     try:
-        config = ScannerConfig()
-        scanner = UltimateHybridScanner(config)
-        success = await scanner.initialize_exchange()
-        
-        if not success:
-            logging.error("❌ Failed to initialize exchange. Exiting.")
-            return
-        
-        # Start the scanner
-        await scanner.start_continuous_scanning()
-        
-    except KeyboardInterrupt:
-        logging.info("🛑 Ultimate OLD-filter scanner stopped by user")
+        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                      data={"chat_id": CHAT_ID, "text": text}, timeout=10)
+        return True
     except Exception as e:
-        logging.error(f"❌ Ultimate OLD-filter scanner error: {e}")
-    finally:
-        if 'scanner' in locals():
-            await scanner.cleanup()
+        print("Telegram send error:", e)
+        return False
 
-if __name__ == "__main__":
-    asyncio.run(main())
+def safe_get_json(url, params=None, timeout=5, retries=1):
+    """Fetch JSON with light retry/backoff and logging."""
+    for attempt in range(retries + 1):
+        try:
+            r = requests.get(url, params=params, timeout=timeout)
+            r.raise_for_status()
+            return r.json()
+        except requests.exceptions.RequestException as e:
+            print(f"⚠️ API request error ({e}) for {url} params={params} attempt={attempt+1}/{retries+1}")
+            if attempt < retries:
+                time.sleep(0.6 * (attempt + 1))
+                continue
+            return None
+        except Exception as e:
+            print(f"⚠️ Unexpected error fetching {url}: {e}")
+            return None
+
+# ===== BYBIT / SYMBOL FUNCTIONS =====
+def get_top_symbols(n=TOP_SYMBOLS):
+    """Get top n USDT pairs by quote volume using Bybit tickers."""
+    params = {"category": "linear"}
+    j = safe_get_json(BYBIT_TICKERS, params=params, timeout=5, retries=1)
+    if not j or "result" not in j or "list" not in j["result"]:
+        return ["BTCUSDT","ETHUSDT"]
+    rows = j["result"]["list"]
+    usdt = []
+    for d in rows:
+        s = d.get("symbol","")
+        if not s.upper().endswith("USDT"):
+            continue
+        try:
+            vol = float(d.get("volume24h", 0))
+            last = float(d.get("lastPrice", 0)) or 0
+            quote_vol = vol * (last or 1.0)
+            usdt.append((s.upper(), quote_vol))
+        except Exception:
+            continue
+    usdt.sort(key=lambda x: x[1], reverse=True)
+    syms = [sanitize_symbol(s[0]) for s in usdt[:n]]
+    if not syms:
+        return ["BTCUSDT","ETHUSDT"]
+    return syms
+
+def get_24h_quote_volume(symbol):
+    symbol = sanitize_symbol(symbol)
+    if not symbol:
+        return 0.0
+    params = {"category": "linear", "symbol": symbol}
+    j = safe_get_json(BYBIT_TICKERS, params=params, timeout=5, retries=1)
+    if not j or "result" not in j or "list" not in j["result"]:
+        return 0.0
+    for d in j["result"]["list"]:
+        if d.get("symbol","").upper() == symbol:
+            try:
+                vol = float(d.get("volume24h", 0))
+                last = float(d.get("lastPrice", 0)) or 0
+                return vol * (last or 1.0)
+            except:
+                return 0.0
+    return 0.0
+
+def interval_to_bybit(interval):
+    """Map "15m","30m","1h","4h" to Bybit kline interval values."""
+    m = {"1m":"1", "3m":"3","5m":"5","15m":"15","30m":"30","1h":"60","2h":"120","4h":"240","1d":"D"}
+    return m.get(interval, interval)
+
+def get_klines(symbol, interval="15m", limit=200):
+    """Fetch klines from Bybit public API and return pandas DF with open/high/low/close/volume."""
+    symbol = sanitize_symbol(symbol)
+    if not symbol:
+        return None
+    iv = interval_to_bybit(interval)
+    params = {
+        "category": "linear",
+        "symbol": symbol, 
+        "interval": iv, 
+        "limit": limit
+    }
+    j = safe_get_json(BYBIT_KLINES, params=params, timeout=6, retries=1)
+    if not j or "result" not in j or "list" not in j["result"]:
+        return None
+    data = j["result"]["list"]
+    if not isinstance(data, list):
+        return None
+    try:
+        df = pd.DataFrame(data, columns=["startTime", "open", "high", "low", "close", "volume", "turnover"])
+        df = df[["open","high","low","close","volume"]].astype(float)
+        return df
+    except Exception as e:
+        print(f"⚠️ get_klines parse error for {symbol} {interval}: {e}")
+        return None
+
+def get_price(symbol):
+    symbol = sanitize_symbol(symbol)
+    if not symbol:
+        return None
+    params = {"category": "linear", "symbol": symbol}
+    j = safe_get_json(BYBIT_PRICE, params=params, timeout=5, retries=1)
+    if not j or "result" not in j or "list" not in j["result"]:
+        return None
+    for d in j["result"]["list"]:
+        if d.get("symbol","").upper() == symbol:
+            try:
+                return float(d.get("lastPrice", 0))
+            except:
+                return None
+    return None
+
+# ===== ADVANCED FILTERS =====
+
+def market_hours_ok():
+    """Market Regime Filter - Only trade during high-probability hours"""
+    if not ENABLE_MARKET_REGIME_FILTER:
+        return True
+        
+    utc_hour = datetime.utcnow().hour
+    # Avoid low volatility periods (late US / Early Asia)
+    if utc_hour in [0, 1, 2, 3, 4]:
+        return False
+    # Avoid Asia/London overlap end
+    if utc_hour in [12, 13, 14]:
+        return False
+    return True
+
+def calculate_rsi(series, period=14):
+    """Calculate RSI for momentum confirmation"""
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def momentum_ok(df, direction):
+    """Momentum Confirmation Filter"""
+    if not ENABLE_MOMENTUM_FILTER:
+        return True
+        
+    if len(df) < 20:
+        return False
+    
+    # RSI check
+    rsi = calculate_rsi(df["close"], 14)
+    current_rsi = rsi.iloc[-1] if not rsi.empty else 50
+    
+    # Avoid overbought/oversold extremes
+    if direction == "BUY" and current_rsi > 65:
+        return False
+    if direction == "SELL" and current_rsi < 35:
+        return False
+    
+    # Price momentum check
+    price_5 = df["close"].iloc[-5] if len(df) >= 5 else df["close"].iloc[0]
+    price_trend = df["close"].iloc[-1] > price_5
+    
+    if direction == "BUY" and not price_trend:
+        return False
+    if direction == "SELL" and price_trend:
+        return False
+        
+    return True
+
+def near_key_level(symbol, price, threshold=0.015):
+    """Support/Resistance Confirmation - Avoid key levels"""
+    if not ENABLE_SR_FILTER:
+        return False
+        
+    df_4h = get_klines(symbol, "4h", 100)
+    if df_4h is None or len(df_4h) < 50:
+        return False
+    
+    # Calculate recent support/resistance
+    resistance = df_4h["high"].rolling(20).max().iloc[-1]
+    support = df_4h["low"].rolling(20).min().iloc[-1]
+    
+    # Check if near key levels (within 1.5%)
+    near_resistance = abs(price - resistance) / price < threshold
+    near_support = abs(price - support) / price < threshold
+    
+    return near_support or near_resistance
+
+def btc_dominance_filter(symbol):
+    """BTC Dominance Filter - Market sentiment awareness"""
+    if not ENABLE_BTC_DOMINANCE_FILTER:
+        return True
+        
+    dom = get_dominance_cached()
+    btc_dom = dom.get("BTC", 50)
+    
+    # High BTC dominance = risk-off, be careful with alts
+    if btc_dom > 55 and not symbol.startswith("BTC"):
+        return False
+    
+    # Low BTC dominance = risk-on, alts perform better
+    if btc_dom < 45 and symbol.startswith("BTC"):
+        return False
+        
+    return True
+
+# ===== CACHED COINGECKO FUNCTIONS =====
+def get_coingecko_global():
+    """Get CoinGecko global data with rate limiting protection"""
+    try:
+        j = safe_get_json(COINGECKO_GLOBAL, {}, timeout=6, retries=1)
+        return j
+    except Exception as e:
+        print(f"⚠️ CoinGecko API error: {e}")
+        return None
+
+def get_dominance_cached():
+    """Get dominance data with caching to avoid rate limits"""
+    global DOMINANCE_CACHE
+    
+    now = time.time()
+    # Return cached data if still valid
+    if (DOMINANCE_CACHE["data"] is not None and 
+        now - DOMINANCE_CACHE["timestamp"] < DOMINANCE_CACHE_DURATION):
+        return DOMINANCE_CACHE["data"]
+    
+    # Fetch fresh data
+    j = get_coingecko_global()
+    if not j or "data" not in j:
+        # Return cached data even if expired as fallback
+        return DOMINANCE_CACHE["data"] or {}
+    
+    mc = j["data"].get("market_cap_percentage", {})
+    dominance_data = {k.upper(): float(v) for k,v in mc.items()}
+    
+    # Update cache
+    DOMINANCE_CACHE = {
+        "data": dominance_data,
+        "timestamp": now
+    }
+    
+    return dominance_data
+
+def get_sentiment_cached():
+    """Get sentiment data with caching"""
+    global SENTIMENT_CACHE
+    
+    now = time.time()
+    # Return cached data if still valid
+    if (SENTIMENT_CACHE["data"] is not None and 
+        now - SENTIMENT_CACHE["timestamp"] < SENTIMENT_CACHE_DURATION):
+        return SENTIMENT_CACHE["data"]
+    
+    # Fetch fresh data
+    j = get_coingecko_global()
+    if not j or "data" not in j:
+        return SENTIMENT_CACHE["data"] or "neutral"
+    
+    v = j["data"].get("market_cap_change_percentage_24h_usd", None)
+    if v is None:
+        sentiment = "neutral"
+    elif v < -2.0:
+        sentiment = "fear"
+    elif v > 2.0:
+        sentiment = "greed"
+    else:
+        sentiment = "neutral"
+    
+    # Update cache
+    SENTIMENT_CACHE = {
+        "data": sentiment,
+        "timestamp": now
+    }
+    
+    return sentiment
+
+# ===== UPDATED DOMINANCE & SENTIMENT FUNCTIONS =====
+def get_dominance():
+    """Backward compatibility wrapper"""
+    return get_dominance_cached()
+
+def dominance_ok(symbol):
+    """Apply relaxed dominance rules with fallback"""
+    dom = get_dominance_cached()
+    
+    # If we can't get dominance data, allow the trade
+    if not dom:
+        print(f"⚠️ No dominance data available, allowing {symbol}")
+        return True
+    
+    btc_dom = dom.get("BTC", None)
+    eth_dom = dom.get("ETH", None)
+    
+    if symbol.upper().startswith("BTC") or symbol.upper() == "BTCUSDT":
+        return True
+    if symbol.upper().startswith("ETH") or symbol.upper() == "ETHUSDT":
+        return True
+        
+    sol_dom = dom.get("SOL", None)
+    if symbol.upper().startswith("SOL") and sol_dom is not None:
+        return sol_dom <= 63.0
+        
+    # Fallback to BTC dominance if available
+    if btc_dom is not None:
+        return btc_dom <= 62.0
+        
+    # If all else fails, allow the trade
+    return True
+
+def sentiment_label():
+    """Get sentiment with caching"""
+    return get_sentiment_cached()
+
+# ===== INDICATORS =====
+def detect_crt(df):
+    if len(df) < 12:
+        return False, False
+    last = df.iloc[-1]
+    o = float(last["open"]); h = float(last["high"]); l = float(last["low"]); c = float(last["close"]); v = float(last["volume"])
+    body_series = (df["close"] - df["open"]).abs()
+    avg_body = body_series.rolling(8, min_periods=6).mean().iloc[-1]
+    avg_vol  = df["volume"].rolling(8, min_periods=6).mean().iloc[-1]
+    if np.isnan(avg_body) or np.isnan(avg_vol):
+        return False, False
+    body = abs(c - o)
+    wick_up   = h - max(o, c)
+    wick_down = min(o, c) - l
+    bull = (body < avg_body * 0.8) and (wick_down > avg_body * 0.5) and (v < avg_vol * 1.5) and (c > o)
+    bear = (body < avg_body * 0.8) and (wick_up   > avg_body * 0.5) and (v < avg_vol * 1.5) and (c < o)
+    return bull, bear
+
+def detect_turtle(df, look=20):
+    if len(df) < look+2:
+        return False, False
+    ph = df["high"].iloc[-look-1:-1].max()
+    pl = df["low"].iloc[-look-1:-1].min()
+    last = df.iloc[-1]
+    bull = (last["low"] < pl) and (last["close"] > pl*1.002)
+    bear = (last["high"] > ph) and (last["close"] < ph*0.998)
+    return bull, bear
+
+def smc_bias(df):
+    e20 = df["close"].ewm(span=20).mean().iloc[-1]
+    e50 = df["close"].ewm(span=50).mean().iloc[-1]
+    return "bull" if e20 > e50 else "bear"
+
+def volume_ok(df):
+    ma = df["volume"].rolling(20, min_periods=8).mean().iloc[-1]
+    if np.isnan(ma):
+        return True
+    current = df["volume"].iloc[-1]
+    return current > ma * 1.3
+
+# ===== DOUBLE TIMEFRAME CONFIRMATION =====
+def get_direction_from_ma(df, span=20):
+    try:
+        ma = df["close"].ewm(span=span).mean().iloc[-1]
+        return "BUY" if df["close"].iloc[-1] > ma else "SELL"
+    except Exception:
+        return None
+
+def tf_agree(symbol, tf_low, tf_high):
+    df_low = get_klines(symbol, tf_low, 100)
+    df_high = get_klines(symbol, tf_high, 100)
+    if df_low is None or df_high is None or len(df_low) < 30 or len(df_high) < 30:
+        return True  # More forgiving - assume agreement if data missing
+    
+    dir_low = get_direction_from_ma(df_low)
+    dir_high = get_direction_from_ma(df_high)
+    
+    if dir_low is None or dir_high is None:
+        return True  # Forgiving on errors
+    
+    # Allow some flexibility - consider it agreement if directions are not opposite
+    if dir_low == dir_high:
+        return True
+    else:
+        # Check if the difference is significant enough to matter
+        ma_low = df_low["close"].ewm(span=20).mean().iloc[-1]
+        ma_high = df_high["close"].ewm(span=20).mean().iloc[-1]
+        price_low = df_low["close"].iloc[-1]
+        price_high = df_high["close"].iloc[-1]
+        
+        # If both are close to their MAs, it's not a strong disagreement
+        low_diff = abs(price_low - ma_low) / ma_low
+        high_diff = abs(price_high - ma_high) / ma_high
+        
+        # If both are in "neutral" zone (close to MA), consider it agreement
+        if low_diff < 0.005 and high_diff < 0.005:  # Both within 0.5% of MA
+            return True
+    
+    return dir_low == dir_high
+
+# ===== ATR & POSITION SIZING =====
+def get_atr(symbol, period=14):
+    symbol = sanitize_symbol(symbol)
+    if not symbol:
+        return None
+    df = get_klines(symbol, "1h", period+1)
+    if df is None or len(df) < period+1:
+        return None
+    h = df["high"].values
+    l = df["low"].values
+    c = df["close"].values
+    trs = []
+    for i in range(1, len(df)):
+        trs.append(max(h[i]-l[i], abs(h[i]-c[i-1]), abs(l[i]-c[i-1])))
+    if not trs:
+        return None
+    return max(float(np.mean(trs)), 1e-8)
+
+def trade_params(symbol, entry, side, atr_multiplier_sl=1.7, tp_mults=(1.8,2.8,3.8), conf_multiplier=1.0):
+    atr = get_atr(symbol)
+    if atr is None:
+        return None
+    # TUNE: keep atr realistically bounded relative to price
+    atr = max(min(atr, entry * 0.05), entry * 0.0001)
+    adj_sl_multiplier = atr_multiplier_sl * (1.0 + (0.5 - conf_multiplier) * 0.5)
+    if side == "BUY":
+        sl  = round(entry - atr * adj_sl_multiplier, 8)
+        tp1 = round(entry + atr * tp_mults[0] * conf_multiplier, 8)
+        tp2 = round(entry + atr * tp_mults[1] * conf_multiplier, 8)
+        tp3 = round(entry + atr * tp_mults[2] * conf_multiplier, 8)
+    else:
+        sl  = round(entry + atr * adj_sl_multiplier, 8)
+        tp1 = round(entry - atr * tp_mults[0] * conf_multiplier, 8)
+        tp2 = round(entry - atr * tp_mults[1] * conf_multiplier, 8)
+        tp3 = round(entry - atr * tp_mults[2] * conf_multiplier, 8)
+    return sl, tp1, tp2, tp3
+
+def pos_size_units(entry, sl, confidence_pct):
+    conf = max(0.0, min(100.0, confidence_pct))
+    risk_percent = MIN_RISK + (MAX_RISK - MIN_RISK) * (conf / 100.0)
+    # override to aggressive base risk:
+    risk_percent = max(risk_percent, BASE_RISK)
+    risk_percent = max(MIN_RISK, min(MAX_RISK, risk_percent))
+    risk_usd     = CAPITAL * risk_percent
+    sl_dist      = abs(entry - sl)
+    min_sl = max(entry * MIN_SL_DISTANCE_PCT, 1e-8)
+    if sl_dist < min_sl:
+        return 0.0, 0.0, 0.0, risk_percent
+    units = risk_usd / sl_dist
+    exposure = units * entry
+    max_exposure = CAPITAL * MAX_EXPOSURE_PCT
+    if exposure > max_exposure and exposure > 0:
+        units = max_exposure / entry
+        exposure = units * entry
+    margin_req = exposure / LEVERAGE
+    if margin_req < MIN_MARGIN_USD:
+        return 0.0, 0.0, 0.0, risk_percent
+    return round(units,8), round(margin_req,6), round(exposure,6), risk_percent
+
+# ===== BTC TREND & VOLATILITY (Bybit data) =====
+def btc_volatility_spike():
+    df = get_klines("BTCUSDT", "5m", 3)
+    if df is None or len(df) < 3:
+        return False
+    pct = (df["close"].iloc[-1] - df["close"].iloc[0]) / df["close"].iloc[0] * 100.0
+    return abs(pct) >= VOLATILITY_THRESHOLD_PCT
+
+def btc_trend_agree():
+    df1 = get_klines("BTCUSDT", "1h", 300)
+    df4 = get_klines("BTCUSDT", "4h", 300)
+    if df1 is None or df4 is None:
+        return None, None, None
+    b1 = smc_bias(df1)
+    b4 = smc_bias(df4)
+    sma200 = df4["close"].rolling(200).mean().iloc[-1] if len(df4)>=200 else None
+    btc_price = float(df4["close"].iloc[-1])
+    trend_by_sma = "bull" if (sma200 and btc_price > sma200) else ("bear" if sma200 and btc_price < sma200 else None)
+    return (b1 == b4), (b1 if b1==b4 else None), trend_by_sma
+
+# ===== LOGGING =====
+def init_csv():
+    if not os.path.exists(LOG_CSV):
+        with open(LOG_CSV,"w",newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "timestamp_utc","symbol","side","entry","tp1","tp2","tp3","sl",
+                "tf","units","margin_usd","exposure_usd","risk_pct","confidence_pct","status","breakdown"
+            ])
+
+def log_signal(row):
+    try:
+        with open(LOG_CSV,"a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(row)
+    except Exception as e:
+        print("log_signal error:", e)
+
+def log_trade_close(trade):
+    try:
+        with open(LOG_CSV,"a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                datetime.utcnow().isoformat(), trade["s"], trade["side"], trade.get("entry"),
+                trade.get("tp1"), trade.get("tp2"), trade.get("tp3"), trade.get("sl"),
+                trade.get("entry_tf"), trade.get("units"), trade.get("margin"), trade.get("exposure"),
+                trade.get("risk_pct")*100 if trade.get("risk_pct") else None, trade.get("confidence_pct"),
+                trade.get("st"), trade.get("close_breakdown", "")
+            ])
+    except Exception as e:
+        print("log_trade_close error:", e)
+
+# ===== ENHANCED ANALYSIS & SIGNAL GENERATION =====
+def current_total_exposure():
+    return sum([t.get("exposure", 0) for t in open_trades if t.get("st") == "open"])
+
+def analyze_symbol(symbol):
+    global total_checked_signals, skipped_signals, signals_sent_total, last_trade_time, volatility_pause_until, STATS, recent_signals
+    total_checked_signals += 1
+    now = time.time()
+    if time.time() < volatility_pause_until:
+        return False
+
+    if not symbol or not isinstance(symbol, str):
+        skipped_signals += 1
+        return False
+
+    if symbol in SYMBOL_BLACKLIST:
+        skipped_signals += 1
+        return False
+
+    # Market Regime Filter
+    if not market_hours_ok():
+        skipped_signals += 1
+        return False
+
+    vol24 = get_24h_quote_volume(symbol)
+    if vol24 < MIN_QUOTE_VOLUME:
+        skipped_signals += 1
+        return False
+
+    if last_trade_time.get(symbol, 0) > now:
+        print(f"Cooldown active for {symbol}, skipping until {datetime.fromtimestamp(last_trade_time.get(symbol))}")
+        skipped_signals += 1
+        return False
+
+    # Check dominance early
+    if not dominance_ok(symbol):
+        print(f"Skipping {symbol}: dominance filter blocked it.")
+        skipped_signals += 1
+        return False
+
+    # BTC Dominance Filter
+    if not btc_dominance_filter(symbol):
+        print(f"Skipping {symbol}: BTC dominance filter blocked.")
+        skipped_signals += 1
+        return False
+
+    tf_confirmations = 0
+    chosen_dir      = None
+    chosen_entry    = None
+    chosen_tf       = None
+    confirming_tfs  = []
+    breakdown_per_tf = {}
+    per_tf_scores = []
+
+    for tf in TIMEFRAMES:
+        df = get_klines(symbol, tf)
+        if df is None or len(df) < 60:
+            breakdown_per_tf[tf] = None
+            continue
+
+        tf_index = TIMEFRAMES.index(tf)
+        
+        # Calculate indicators FIRST
+        crt_b, crt_s = detect_crt(df)
+        ts_b, ts_s = detect_turtle(df)
+        bias        = smc_bias(df)
+        vol_ok      = volume_ok(df)
+
+        bull_score = (WEIGHT_CRT*(1 if crt_b else 0) + WEIGHT_TURTLE*(1 if ts_b else 0) +
+                      WEIGHT_VOLUME*(1 if vol_ok else 0) + WEIGHT_BIAS*(1 if bias=="bull" else 0))*100
+        bear_score = (WEIGHT_CRT*(1 if crt_s else 0) + WEIGHT_TURTLE*(1 if ts_s else 0) +
+                      WEIGHT_VOLUME*(1 if vol_ok else 0) + WEIGHT_BIAS*(1 if bias=="bear" else 0))*100
+
+        current_tf_strength = max(bull_score, bear_score)
+        
+        # Store breakdown data (convert numpy bool to Python bool)
+        breakdown_data = {
+            "bull_score": int(bull_score),
+            "bear_score": int(bear_score),
+            "bias": bias,
+            "vol_ok": bool(vol_ok),  # Convert numpy bool to Python bool
+            "crt_b": bool(crt_b),
+            "crt_s": bool(crt_s),
+            "ts_b": bool(ts_b),
+            "ts_s": bool(ts_s)
+        }
+        
+        # Simple timeframe agreement check - only skip if TFs strongly disagree
+        if tf_index < len(TIMEFRAMES) - 1:
+            higher_tf = TIMEFRAMES[tf_index + 1]
+            tf_agreement = tf_agree(symbol, tf, higher_tf)
+            
+            # Only skip if timeframes strongly disagree AND signal is weak
+            if not tf_agreement and current_tf_strength < 60:
+                breakdown_per_tf[tf] = {
+                    "skipped_due_tf_disagree": True, 
+                    "strength": current_tf_strength
+                }
+                continue
+
+        breakdown_per_tf[tf] = breakdown_data
+        per_tf_scores.append(current_tf_strength)
+
+        if bull_score >= MIN_TF_SCORE:
+            tf_confirmations += 1
+            chosen_dir    = "BUY"
+            chosen_entry  = float(df["close"].iloc[-1])
+            chosen_tf     = tf
+            confirming_tfs.append(tf)
+        elif bear_score >= MIN_TF_SCORE:
+            tf_confirmations += 1
+            chosen_dir   = "SELL"
+            chosen_entry = float(df["close"].iloc[-1])
+            chosen_tf    = tf
+            confirming_tfs.append(tf)
+
+    print(f"Scanning {symbol}: {tf_confirmations}/{len(TIMEFRAMES)} confirmations. Breakdown: {breakdown_per_tf}")
+
+    # require at least CONF_MIN_TFS confirmations (aggressive default may be 2)
+    if not (tf_confirmations >= CONF_MIN_TFS and chosen_dir and chosen_entry is not None):
+        return False
+
+    # compute confidence
+    confidence_pct = float(np.mean(per_tf_scores)) if per_tf_scores else 100.0
+    confidence_pct = max(0.0, min(100.0, confidence_pct))
+
+    # --- Aggressive Mode Safety Check (small fallback to avoid junk signals) ---
+    if confidence_pct < CONFIDENCE_MIN or tf_confirmations < CONF_MIN_TFS:
+        print(f"Skipping {symbol}: safety check failed (conf={confidence_pct:.1f}%, tfs={tf_confirmations}).")
+        skipped_signals += 1
+        return False
+
+    # ===== AEGIS FRAMEWORK FILTERS =====
+    # 1. SENTIMENT FILTER: REJECT ALL GREED SIGNALS
+    sentiment = sentiment_label()
+    if sentiment == "greed":
+        print(f"🚫 AEGIS FILTER: Skipping {symbol} - Greed sentiment detected")
+        skipped_signals += 1
+        return False
+    
+    # 2. TIMEFRAME FILTER: MUST HAVE 4H CONFIRMATION  
+    if "4h" not in confirming_tfs:
+        print(f"🚫 AEGIS FILTER: Skipping {symbol} - No 4h timeframe confirmation")
+        skipped_signals += 1
+        return False
+    # ===== END AEGIS FRAMEWORK FILTERS =====
+
+    # ===== MOMENTUM INTEGRITY FRAMEWORK CHECKS =====
+    # These can be disabled via config flags - completely optional
+    
+    # 1. Trend Alignment Check (Prevents RESOLV/TAO disasters)
+    if ENABLE_TREND_ALIGNMENT_FILTER and not trend_alignment_ok(symbol, chosen_dir):
+        print(f"🚫 Skipping {symbol}: Trend alignment failed - fighting {chosen_dir} trend")
+        skipped_signals += 1
+        return False
+        
+    # 2. Market Context Assessment  
+    if ENABLE_MARKET_CONTEXT_FILTER and not market_context_ok(symbol, chosen_dir, confidence_pct):
+        print(f"🚫 Skipping {symbol}: Market context score too low")
+        skipped_signals += 1
+        return False
+        
+    # 3. Circuit Breaker Check (Prevents revenge trading)
+    if ENABLE_CIRCUIT_BREAKER and not circuit_breaker_ok(symbol, chosen_dir):
+        skipped_signals += 1
+        return False
+        
+    # 4. Intelligent Sentiment Interpretation (Fixes "fear = short")
+    if ENABLE_INTELLIGENT_SENTIMENT:
+        sentiment_analysis = intelligent_sentiment_check(sentiment, symbol, chosen_dir)
+        if sentiment_analysis == "CAUTION":
+            print(f"🚫 Skipping {symbol}: Sentiment-trend conflict detected")
+            skipped_signals += 1
+            return False
+    # ===== END MOMENTUM INTEGRITY FRAMEWORK =====
+
+    # Advanced Filters Check
+    entry = get_price(symbol)
+    if entry is None:
+        skipped_signals += 1
+        return False
+
+    # Support/Resistance Filter
+    if near_key_level(symbol, entry):
+        print(f"Skipping {symbol}: too close to key support/resistance level.")
+        skipped_signals += 1
+        return False
+
+    # Momentum Filter
+    df_main = get_klines(symbol, "15m")  # Use 15m for momentum check
+    if df_main is not None and not momentum_ok(df_main, chosen_dir):
+        print(f"Skipping {symbol}: momentum filter failed.")
+        skipped_signals += 1
+        return False
+
+    # global open-trade / exposure limits
+    if len([t for t in open_trades if t.get("st") == "open"]) >= MAX_OPEN_TRADES:
+        print(f"Skipping {symbol}: max open trades reached ({MAX_OPEN_TRADES}).")
+        skipped_signals += 1
+        return False
+
+    # FIXED: Enhanced duplicate signal prevention with longer cooldown
+    sig = (symbol, chosen_dir, round(chosen_entry, 6))
+    current_time = time.time()
+    if sig in recent_signals:
+        time_since_last = current_time - recent_signals[sig]
+        if time_since_last < RECENT_SIGNAL_SIGNATURE_EXPIRE * 2:  # Double the cooldown
+            print(f"Skipping {symbol}: duplicate recent signal {sig} ({(RECENT_SIGNAL_SIGNATURE_EXPIRE * 2 - time_since_last):.0f}s remaining).")
+            skipped_signals += 1
+            return False
+    
+    recent_signals[sig] = current_time
+
+    conf_multiplier = max(0.5, min(1.3, confidence_pct / 100.0 + 0.5))
+    tp_sl = trade_params(symbol, entry, chosen_dir, conf_multiplier=conf_multiplier)
+    if not tp_sl:
+        skipped_signals += 1
+        return False
+    sl, tp1, tp2, tp3 = tp_sl
+
+    units, margin, exposure, risk_used = pos_size_units(entry, sl, confidence_pct)
+
+    if units <= 0 or margin <= 0 or exposure <= 0:
+        print(f"Skipping {symbol}: invalid position sizing (units:{units}, margin:{margin}).")
+        skipped_signals += 1
+        return False
+
+    if exposure > CAPITAL * MAX_EXPOSURE_PCT:
+        print(f"Skipping {symbol}: exposure {exposure} > {MAX_EXPOSURE_PCT*100:.0f}% of capital.")
+        skipped_signals += 1
+        return False
+
+    # Add Momentum Integrity Framework status to message
+    mif_status = " | MIF: ✅ PASSED" if (ENABLE_TREND_ALIGNMENT_FILTER or ENABLE_MARKET_CONTEXT_FILTER or ENABLE_CIRCUIT_BREAKER or ENABLE_INTELLIGENT_SENTIMENT) else ""
+    
+    header = (f"✅ {chosen_dir} {symbol}\n"
+              f"💵 Entry: {entry}\n"
+              f"🎯 TP1:{tp1} TP2:{tp2} TP3:{tp3}\n"
+              f"🛑 SL: {sl}\n"
+              f"💰 Units:{units} | Margin≈${margin} | Exposure≈${exposure}\n"
+              f"⚠ Risk used: {risk_used*100:.2f}% | Confidence: {confidence_pct:.1f}% | Sentiment:{sentiment}\n"
+              f"🧾 TFs confirming: {', '.join(confirming_tfs)}\n"
+              f"🔍 Advanced Filters: ✅ PASSED{mif_status}")
+
+    send_message(header)
+
+    trade_obj = {
+        "s": symbol,
+        "side": chosen_dir,
+        "entry": entry,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "sl": sl,
+        "st": "open",           # signal-only mode: we keep a record for tracking TP/SL via market checks
+        "units": units,
+        "margin": margin,
+        "exposure": exposure,
+        "risk_pct": risk_used,
+        "confidence_pct": confidence_pct,
+        "tp1_taken": False,
+        "tp2_taken": False,
+        "tp3_taken": False,
+        "placed_at": time.time(),
+        "entry_tf": chosen_tf,
+        "breakdown": breakdown_per_tf
+    }
+    open_trades.append(trade_obj)
+    signals_sent_total += 1
+    STATS["by_side"][chosen_dir]["sent"] += 1
+    if chosen_tf in STATS["by_tf"]:
+        STATS["by_tf"][chosen_tf]["sent"] += 1
+    log_signal([
+        datetime.utcnow().isoformat(), symbol, chosen_dir, entry,
+        tp1, tp2, tp3, sl, chosen_tf, units, margin, exposure,
+        risk_used*100, confidence_pct, "open", str(breakdown_per_tf)
+    ])
+    print(f"✅ HIGH QUALITY Signal sent for {symbol} at entry {entry}. Confidence {confidence_pct:.1f}%")
+    
+    # Apply immediate cooldown to prevent duplicate signals
+    last_trade_time[symbol] = time.time() + 300  # 5-minute cooldown per symbol
+    return True
+
+# ===== TRADE CHECK (TP/SL/BREAKEVEN) =====
+def check_trades():
+    global signals_hit_total, signals_fail_total, signals_breakeven, STATS, last_trade_time, last_trade_result
+    for t in list(open_trades):
+        if t.get("st") != "open":
+            continue
+        p = get_price(t["s"])
+        if p is None:
+            continue
+        side = t["side"]
+
+        if side == "BUY":
+            if not t["tp1_taken"] and p >= t["tp1"]:
+                t["tp1_taken"] = True
+                t["sl"] = t["entry"]  # move to BE
+                send_message(f"🎯 {t['s']} TP1 Hit {p} — SL moved to breakeven.")
+                STATS["by_side"]["BUY"]["hit"] += 1
+                STATS["by_tf"][t["entry_tf"]]["hit"] += 1
+                signals_hit_total += 1
+                last_trade_result[t["s"]] = "win"
+                last_trade_time[t["s"]] = time.time() + COOLDOWN_TIME_SUCCESS
+                # Update circuit breaker on success
+                if ENABLE_CIRCUIT_BREAKER:
+                    update_circuit_breaker(t["s"], t["side"], True)
+                continue
+            if t["tp1_taken"] and not t["tp2_taken"] and p >= t["tp2"]:
+                t["tp2_taken"] = True
+                send_message(f"🎯 {t['s']} TP2 Hit {p}")
+                STATS["by_side"]["BUY"]["hit"] += 1
+                STATS["by_tf"][t["entry_tf"]]["hit"] += 1
+                signals_hit_total += 1
+                last_trade_result[t["s"]] = "win"
+                last_trade_time[t["s"]] = time.time() + COOLDOWN_TIME_SUCCESS
+                continue
+            if t["tp2_taken"] and not t["tp3_taken"] and p >= t["tp3"]:
+                t["tp3_taken"] = True
+                t["st"] = "closed"
+                send_message(f"🏁 {t['s']} TP3 Hit {p} — Trade closed.")
+                STATS["by_side"]["BUY"]["hit"] += 1
+                STATS["by_tf"][t["entry_tf"]]["hit"] += 1
+                signals_hit_total += 1
+                last_trade_result[t["s"]] = "win"
+                last_trade_time[t["s"]] = time.time() + COOLDOWN_TIME_SUCCESS
+                # Update circuit breaker on success
+                if ENABLE_CIRCUIT_BREAKER:
+                    update_circuit_breaker(t["s"], t["side"], True)
+                log_trade_close(t)
+                continue
+            if p <= t["sl"]:
+                if abs(t["sl"] - t["entry"]) < 1e-8:
+                    t["st"] = "breakeven"
+                    signals_breakeven += 1
+                    STATS["by_side"]["BUY"]["breakeven"] += 1
+                    STATS["by_tf"][t["entry_tf"]]["breakeven"] += 1
+                    send_message(f"⚖️ {t['s']} Breakeven SL Hit {p}")
+                    last_trade_result[t["s"]] = "breakeven"
+                    last_trade_time[t["s"]] = time.time() + COOLDOWN_TIME_SUCCESS
+                    # Update circuit breaker on breakeven (considered success)
+                    if ENABLE_CIRCUIT_BREAKER:
+                        update_circuit_breaker(t["s"], t["side"], True)
+                    log_trade_close(t)
+                else:
+                    t["st"] = "fail"
+                    signals_fail_total += 1
+                    STATS["by_side"]["BUY"]["fail"] += 1
+                    STATS["by_tf"][t["entry_tf"]]["fail"] += 1
+                    send_message(f"❌ {t['s']} SL Hit {p}")
+                    last_trade_result[t["s"]] = "loss"
+                    last_trade_time[t["s"]] = time.time() + COOLDOWN_TIME_FAIL
+                    # Update circuit breaker on failure
+                    if ENABLE_CIRCUIT_BREAKER:
+                        update_circuit_breaker(t["s"], t["side"], False)
+                    log_trade_close(t)
+        else:  # SELL
+            if not t["tp1_taken"] and p <= t["tp1"]:
+                t["tp1_taken"] = True
+                t["sl"] = t["entry"]
+                send_message(f"🎯 {t['s']} TP1 Hit {p} — SL moved to breakeven.")
+                STATS["by_side"]["SELL"]["hit"] += 1
+                STATS["by_tf"][t["entry_tf"]]["hit"] += 1
+                signals_hit_total += 1
+                last_trade_result[t["s"]] = "win"
+                last_trade_time[t["s"]] = time.time() + COOLDOWN_TIME_SUCCESS
+                # Update circuit breaker on success
+                if ENABLE_CIRCUIT_BREAKER:
+                    update_circuit_breaker(t["s"], t["side"], True)
+                continue
+            if t["tp1_taken"] and not t["tp2_taken"] and p <= t["tp2"]:
+                t["tp2_taken"] = True
+                send_message(f"🎯 {t['s']} TP2 Hit {p}")
+                STATS["by_side"]["SELL"]["hit"] += 1
+                STATS["by_tf"][t["entry_tf"]]["hit"] += 1
+                signals_hit_total += 1
+                last_trade_result[t["s"]] = "win"
+                last_trade_time[t["s"]] = time.time() + COOLDOWN_TIME_SUCCESS
+                continue
+            if t["tp2_taken"] and not t["tp3_taken"] and p <= t["tp3"]:
+                t["tp3_taken"] = True
+                t["st"] = "closed"
+                send_message(f"🏁 {t['s']} TP3 Hit {p} — Trade closed.")
+                STATS["by_side"]["SELL"]["hit"] += 1
+                STATS["by_tf"][t["entry_tf"]]["hit"] += 1
+                signals_hit_total += 1
+                last_trade_result[t["s"]] = "win"
+                last_trade_time[t["s"]] = time.time() + COOLDOWN_TIME_SUCCESS
+                # Update circuit breaker on success
+                if ENABLE_CIRCUIT_BREAKER:
+                    update_circuit_breaker(t["s"], t["side"], True)
+                log_trade_close(t)
+                continue
+            if p >= t["sl"]:
+                if abs(t["sl"] - t["entry"]) < 1e-8:
+                    t["st"] = "breakeven"
+                    signals_breakeven += 1
+                    STATS["by_side"]["SELL"]["breakeven"] += 1
+                    STATS["by_tf"][t["entry_tf"]]["breakeven"] += 1
+                    send_message(f"⚖️ {t['s']} Breakeven SL Hit {p}")
+                    last_trade_result[t["s"]] = "breakeven"
+                    last_trade_time[t["s"]] = time.time() + COOLDOWN_TIME_SUCCESS
+                    # Update circuit breaker on breakeven (considered success)
+                    if ENABLE_CIRCUIT_BREAKER:
+                        update_circuit_breaker(t["s"], t["side"], True)
+                    log_trade_close(t)
+                else:
+                    t["st"] = "fail"
+                    signals_fail_total += 1
+                    STATS["by_side"]["SELL"]["fail"] += 1
+                    STATS["by_tf"][t["entry_tf"]]["fail"] += 1
+                    send_message(f"❌ {t['s']} SL Hit {p}")
+                    last_trade_result[t["s"]] = "loss"
+                    last_trade_time[t["s"]] = time.time() + COOLDOWN_TIME_FAIL
+                    # Update circuit breaker on failure
+                    if ENABLE_CIRCUIT_BREAKER:
+                        update_circuit_breaker(t["s"], t["side"], False)
+                    log_trade_close(t)
+
+    # cleanup closed trades
+    for t in list(open_trades):
+        if t.get("st") in ("closed", "fail", "breakeven"):
+            try:
+                open_trades.remove(t)
+            except Exception:
+                pass
+
+# ===== HEARTBEAT & SUMMARY =====
+def heartbeat():
+    send_message(f"💓 Heartbeat OK {datetime.utcnow().strftime('%H:%M UTC')}")
+    print("💓 Heartbeat sent.")
+
+def summary():
+    total = signals_sent_total
+    hits  = signals_hit_total
+    fails = signals_fail_total
+    breakev = signals_breakeven
+    acc   = (hits / total * 100) if total > 0 else 0.0
+    
+    # Add Momentum Integrity Framework status to summary
+    mif_status = ""
+    if ENABLE_TREND_ALIGNMENT_FILTER or ENABLE_MARKET_CONTEXT_FILTER or ENABLE_CIRCUIT_BREAKER or ENABLE_INTELLIGENT_SENTIMENT:
+        active_filters = []
+        if ENABLE_TREND_ALIGNMENT_FILTER: active_filters.append("TrendAlign")
+        if ENABLE_MARKET_CONTEXT_FILTER: active_filters.append("MarketContext") 
+        if ENABLE_CIRCUIT_BREAKER: active_filters.append("CircuitBreaker")
+        if ENABLE_INTELLIGENT_SENTIMENT: active_filters.append("SmartSentiment")
+        mif_status = f"\n🔧 MIF Active: {', '.join(active_filters)}"
+    
+    send_message(f"📊 Daily Summary\nSignals Sent: {total}\nSignals Checked: {total_checked_signals}\nSignals Skipped: {skipped_signals}\n✅ Hits: {hits}\n⚖️ Breakeven: {breakev}\n❌ Fails: {fails}\n🎯 Accuracy: {acc:.1f}%{mif_status}")
+    print(f"📊 Daily Summary. Accuracy: {acc:.1f}%")
+    print("Stats by side:", STATS["by_side"])
+    print("Stats by TF:", STATS["by_tf"])
+
+# ===== STARTUP =====
+init_csv()
+# Add Momentum Integrity Framework status to startup message
+mif_status = ""
+if ENABLE_TREND_ALIGNMENT_FILTER or ENABLE_MARKET_CONTEXT_FILTER or ENABLE_CIRCUIT_BREAKER or ENABLE_INTELLIGENT_SENTIMENT:
+    mif_status = "\n🚀 Momentum Integrity Framework: ACTIVE"
+
+send_message(f"✅ SIRTS v10 High-Accuracy Mode Deployed\n🎯 Target: 85%+ Accuracy | 20+ Signals Daily\n🔧 Advanced Filters: ACTIVE\n🔄 API Rate Limit Protection: ENABLED{mif_status}")
+print("✅ SIRTS v10 High-Accuracy Mode deployed with API protection.")
+
+try:
+    SYMBOLS = get_top_symbols(TOP_SYMBOLS)
+    print(f"Monitoring {len(SYMBOLS)} symbols (Top {TOP_SYMBOLS}).")
+except Exception as e:
+    SYMBOLS = ["BTCUSDT","ETHUSDT"]
+    print("Warning retrieving top symbols, defaulting to BTCUSDT & ETHUSDT.")
+
+# ===== MAIN LOOP =====
+while True:
+    try:
+        if btc_volatility_spike():
+            volatility_pause_until = time.time() + VOLATILITY_PAUSE
+            send_message(f"⚠️ BTC volatility spike detected — pausing signals for {VOLATILITY_PAUSE//60} minutes.")
+            print(f"⚠️ BTC volatility spike – pausing until {datetime.fromtimestamp(volatility_pause_until)}")
+
+        for i, sym in enumerate(SYMBOLS, start=1):
+            print(f"[{i}/{len(SYMBOLS)}] Scanning {sym} …")
+            try:
+                analyze_symbol(sym)
+            except Exception as e:
+                print(f"⚠️ Error scanning {sym}: {e}")
+            time.sleep(API_CALL_DELAY)
+
+        check_trades()
+
+        now = time.time()
+        if now - last_heartbeat > 43200:
+            heartbeat()
+            last_heartbeat = now
+        if now - last_summary > 86400:
+            summary()
+            last_summary = now
+
+        print("Cycle completed at", datetime.utcnow().strftime("%H:%M:%S UTC"))
+        time.sleep(CHECK_INTERVAL)
+    except Exception as e:
+        print("Main loop error:", e)
+        time.sleep(5)

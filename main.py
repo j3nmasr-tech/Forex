@@ -37,9 +37,9 @@ WEIGHT_CRT    = 0.30    # Reversals
 WEIGHT_VOLUME = 0.10    # Volume
 
 # ===== THRESHOLDS =====
-MIN_TF_SCORE  = 40      # Minimum score per timeframe
+MIN_TF_SCORE  = 50      # Minimum score per timeframe
 CONF_MIN_TFS  = 1       # Minimum timeframe confirmations
-CONFIDENCE_MIN = 40.0   # Minimum overall confidence
+CONFIDENCE_MIN = 50.0   # Minimum overall confidence
 TOP_SYMBOLS = 70        # Number of symbols to monitor
 
 # ===== BYBIT PUBLIC ENDPOINTS =====

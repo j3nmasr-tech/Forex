@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# SIRTS v10 – Pure Logic Version | Bybit + Detailed Breakdown + 2-RULE FILTER
-# REQUIREMENTS: CRT-Turtle consensus + Volume confirmation (Primary TF + ≥1 other)
+# SIRTS v10 – Pure Logic Version | Bybit + Detailed Breakdown + 1-RULE FILTER
+# REQUIREMENT: CRT-Turtle consensus ONLY (Volume filter disabled for maximum profit)
 # Requirements: requests, pandas, numpy
 # BOT_TOKEN and CHAT_ID must be set as environment variables
 
@@ -74,14 +74,13 @@ last_summary         = time.time()
 # ===== FILTER FUNCTIONS =====
 def should_accept_signal(symbol, chosen_dir, confirming_tfs, tf_details):
     """
-    Apply the 2-rule filter:
-    1. CRT-Turtle consensus in Primary TF
-    2. Volume confirmation (Primary TF + ≥1 other TF)
+    Apply ONLY CRT-Turtle consensus filter
+    (Volume filter disabled for maximum profit)
     """
     if not confirming_tfs:
         return False, "No confirming timeframes"
     
-    # RULE 1: Find Primary TF (largest Bull/Bear gap)
+    # Find Primary TF (largest Bull/Bear gap)
     primary_tf = None
     max_gap = -1
     
@@ -89,7 +88,6 @@ def should_accept_signal(symbol, chosen_dir, confirming_tfs, tf_details):
         if tf not in tf_details or not isinstance(tf_details[tf], dict):
             continue
         
-        # Calculate Bull/Bear gap (absolute difference)
         bull = tf_details[tf]["bull_score"]
         bear = tf_details[tf]["bear_score"]
         gap = abs(bull - bear)
@@ -101,7 +99,7 @@ def should_accept_signal(symbol, chosen_dir, confirming_tfs, tf_details):
     if not primary_tf:
         return False, "No primary timeframe found"
     
-    # Check CRT-Turtle consensus in Primary TF
+    # ONLY CHECK: CRT-Turtle consensus in Primary TF
     details = tf_details[primary_tf]
     expected_crt = "🐮" if chosen_dir == "BUY" else "🐻"
     
@@ -123,25 +121,8 @@ def should_accept_signal(symbol, chosen_dir, confirming_tfs, tf_details):
     if crt_icon != expected_crt or turtle_icon != expected_crt:
         return False, f"CRT-Turtle direction mismatch in {primary_tf}"
     
-    # RULE 2: Volume confirmation
-    # Primary TF must have volume ✅
-    if not details["volume_ok"]:
-        return False, f"No volume in primary TF {primary_tf}"
-    
-    # At least one other confirming TF must have volume ✅
-    other_volume_ok = 0
-    for tf in confirming_tfs:
-        if tf == primary_tf:
-            continue
-        if tf in tf_details and isinstance(tf_details[tf], dict):
-            if tf_details[tf]["volume_ok"]:
-                other_volume_ok += 1
-    
-    if other_volume_ok < 1:
-        return False, f"Insufficient volume confirmation (need ≥1 other TF)"
-    
-    # All checks passed
-    return True, f"Filter passed - Primary: {primary_tf}, Volume TFs: {other_volume_ok + 1}"
+    # VOLUME FILTER DISABLED - Accept signal if CRT-Turtle matches
+    return True, f"Filter passed (CRT-Turtle only) - Primary: {primary_tf}"
 
 def is_first_entry(symbol):
     """Check if this is the first entry for this symbol"""
@@ -505,7 +486,7 @@ def analyze_symbol(symbol):
         skipped_signals += 1
         return False
     
-    # === STEP 4: APPLY 2-RULE FILTER ===
+    # === STEP 4: APPLY 1-RULE FILTER (CRT-Turtle only) ===
     filter_result, filter_reason = should_accept_signal(
         symbol, chosen_dir, confirming_tfs, tf_details
     )
@@ -564,7 +545,7 @@ def analyze_symbol(symbol):
     breakdown_text += f"• Confirming TFs: {', '.join(confirming_tfs)}\n"
     breakdown_text += f"• Confidence: {confidence_pct:.1f}%\n"
     breakdown_text += f"• Market Sentiment: {sentiment.upper()}\n"
-    breakdown_text += f"• Filter Status: PASSED ✓\n"
+    breakdown_text += f"• Filter Status: PASSED (CRT-Turtle only) ✓\n"
     
     # === STEP 9: SEND TRADE SIGNAL ===
     header = (f"✅ {chosen_dir} {symbol}\n"
@@ -575,7 +556,7 @@ def analyze_symbol(symbol):
               f"⚠ Risk: {risk_used*100:.2f}% | Confidence: {confidence_pct:.1f}%\n"
               f"🧾 TFs confirming: {', '.join(confirming_tfs)}\n"
               f"📈 Market Sentiment: {sentiment.upper()}\n"
-              f"🔍 FILTER: PASSED ✓")
+              f"🔍 FILTER: PASSED (CRT-Turtle only) ✓")
     
     # Send both messages
     send_message(header)
@@ -747,8 +728,9 @@ send_message("✅ SIRTS v10 PURE LOGIC DEPLOYED\n"
              "🎯 Target: 85%+ Accuracy\n"
              "📈 Timeframes: 15m, 30m, 1h, 4h\n"
              "📊 Sentiment: CoinGecko Global\n"
-             "🔍 2-RULE FILTER: CRT-Turtle Consensus + Volume Confirmation\n"
-             "🚫 REJECTS: Mismatched signals & Low-volume moves")
+             "🔍 1-RULE FILTER: CRT-Turtle Consensus ONLY\n"
+             "🚫 REJECTS: Mismatched CRT/Turtle signals\n"
+             "📈 VOLUME FILTER: DISABLED (for maximum profit)")
 
 try:
     SYMBOLS = get_top_symbols(TOP_SYMBOLS)

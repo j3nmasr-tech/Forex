@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# SIRTS v10 – Pure Logic Version | Bybit + Detailed Breakdown + 1-RULE FILTER
-# REQUIREMENT: CRT-Turtle consensus ONLY (Volume filter disabled for maximum profit)
+# SIRTS v10 – Pure Logic Version | Bybit + Detailed Breakdown + 2-CRITICAL FILTERS
+# REQUIREMENT: 1) 1-hour alignment required 2) No adjacent TF contradiction
 # Requirements: requests, pandas, numpy
 # BOT_TOKEN and CHAT_ID must be set as environment variables
 
@@ -71,58 +71,106 @@ skipped_signals      = 0
 last_heartbeat       = time.time()
 last_summary         = time.time()
 
-# ===== FILTER FUNCTIONS =====
-def should_accept_signal(symbol, chosen_dir, confirming_tfs, tf_details):
+# ===== FILTER FUNCTIONS (TWO CRITICAL RULES) =====
+def check_1h_alignment(tf_details, trade_direction):
     """
-    Apply ONLY CRT-Turtle consensus filter
-    (Volume filter disabled for maximum profit)
+    FILTER 1: 1-hour timeframe MUST be aligned with trade direction
+    - CRT must match direction
+    - Turtle must match direction  
+    - Bias must confirm direction
     """
-    if not confirming_tfs:
-        return False, "No confirming timeframes"
+    h1_data = tf_details.get('1h')
+    if not h1_data or not isinstance(h1_data, dict):
+        return False, "No 1h data available"
     
-    # Find Primary TF (largest Bull/Bear gap)
-    primary_tf = None
-    max_gap = -1
+    # Check if we have the required indicators
+    if 'crt_bull' not in h1_data or 'crt_bear' not in h1_data:
+        return False, "Missing CRT data in 1h"
+    if 'turtle_bull' not in h1_data or 'turtle_bear' not in h1_data:
+        return False, "Missing Turtle data in 1h"
+    if 'bias' not in h1_data:
+        return False, "Missing Bias data in 1h"
     
-    for tf in confirming_tfs:
-        if tf not in tf_details or not isinstance(tf_details[tf], dict):
-            continue
-        
-        bull = tf_details[tf]["bull_score"]
-        bear = tf_details[tf]["bear_score"]
-        gap = abs(bull - bear)
-        
-        if gap > max_gap:
-            max_gap = gap
-            primary_tf = tf
+    # Check CRT matches direction (boolean flags)
+    if trade_direction == "BUY":
+        if not h1_data["crt_bull"]:
+            return False, "1h CRT not bullish"
+    else:  # SELL
+        if not h1_data["crt_bear"]:
+            return False, "1h CRT not bearish"
     
-    if not primary_tf:
-        return False, "No primary timeframe found"
+    # Check Turtle matches direction (boolean flags)
+    if trade_direction == "BUY":
+        if not h1_data["turtle_bull"]:
+            return False, "1h Turtle not bullish"
+    else:  # SELL
+        if not h1_data["turtle_bear"]:
+            return False, "1h Turtle not bearish"
     
-    # ONLY CHECK: CRT-Turtle consensus in Primary TF
-    details = tf_details[primary_tf]
-    expected_crt = "🐮" if chosen_dir == "BUY" else "🐻"
+    # Check Bias confirms direction
+    bias = h1_data.get("bias", "").lower()
+    if trade_direction == "BUY" and "bull" not in bias:
+        return False, f"1h Bias not bullish: {bias}"
+    if trade_direction == "SELL" and "bear" not in bias:
+        return False, f"1h Bias not bearish: {bias}"
     
-    # Determine CRT icon
-    crt_icon = "➖"
-    if details["crt_bull"]:
-        crt_icon = "🐮"
-    elif details["crt_bear"]:
-        crt_icon = "🐻"
+    return True, "1h alignment passed"
+
+def check_no_adjacent_contradiction(tf_details, trade_direction, entry_tf):
+    """
+    FILTER 2: No adjacent timeframe Turtle contradiction
+    - If BUY: No adjacent TF can have Turtle🐻 (turtle_bear=True)
+    - If SELL: No adjacent TF can have Turtle🐮 (turtle_bull=True)
+    """
+    tf_order = ["15m", "30m", "1h", "4h"]
     
-    # Determine Turtle icon
-    turtle_icon = "➖"
-    if details["turtle_bull"]:
-        turtle_icon = "🐮"
-    elif details["turtle_bear"]:
-        turtle_icon = "🐻"
+    # Find entry TF index
+    if entry_tf not in tf_order:
+        return False, f"Unknown entry TF: {entry_tf}"
     
-    # Check if they match expected direction AND match each other
-    if crt_icon != expected_crt or turtle_icon != expected_crt:
-        return False, f"CRT-Turtle direction mismatch in {primary_tf}"
+    entry_idx = tf_order.index(entry_tf)
     
-    # VOLUME FILTER DISABLED - Accept signal if CRT-Turtle matches
-    return True, f"Filter passed (CRT-Turtle only) - Primary: {primary_tf}"
+    # Check previous TF if exists
+    if entry_idx > 0:
+        prev_tf = tf_order[entry_idx - 1]
+        prev_data = tf_details.get(prev_tf)
+        if prev_data and isinstance(prev_data, dict):
+            # Check for Turtle contradiction
+            if trade_direction == "BUY" and prev_data.get("turtle_bear", False):
+                return False, f"{prev_tf} Turtle contradicts (bearish vs BUY)"
+            if trade_direction == "SELL" and prev_data.get("turtle_bull", False):
+                return False, f"{prev_tf} Turtle contradicts (bullish vs SELL)"
+    
+    # Check next TF if exists
+    if entry_idx < len(tf_order) - 1:
+        next_tf = tf_order[entry_idx + 1]
+        next_data = tf_details.get(next_tf)
+        if next_data and isinstance(next_data, dict):
+            # Check for Turtle contradiction
+            if trade_direction == "BUY" and next_data.get("turtle_bear", False):
+                return False, f"{next_tf} Turtle contradicts (bearish vs BUY)"
+            if trade_direction == "SELL" and next_data.get("turtle_bull", False):
+                return False, f"{next_tf} Turtle contradicts (bullish vs SELL)"
+    
+    return True, "No adjacent contradiction"
+
+def should_accept_signal(symbol, chosen_dir, confirming_tfs, tf_details, entry_tf):
+    """
+    Apply ONLY TWO CRITICAL FILTERS:
+    1. 1-hour alignment required
+    2. No adjacent timeframe Turtle contradiction
+    """
+    # FILTER 1: 1-hour alignment
+    filter1_ok, filter1_reason = check_1h_alignment(tf_details, chosen_dir)
+    if not filter1_ok:
+        return False, filter1_reason
+    
+    # FILTER 2: No adjacent contradiction
+    filter2_ok, filter2_reason = check_no_adjacent_contradiction(tf_details, chosen_dir, entry_tf)
+    if not filter2_ok:
+        return False, filter2_reason
+    
+    return True, "Both critical filters passed"
 
 def is_first_entry(symbol):
     """Check if this is the first entry for this symbol"""
@@ -486,9 +534,9 @@ def analyze_symbol(symbol):
         skipped_signals += 1
         return False
     
-    # === STEP 4: APPLY 1-RULE FILTER (CRT-Turtle only) ===
+    # === STEP 4: APPLY 2-CRITICAL FILTERS ===
     filter_result, filter_reason = should_accept_signal(
-        symbol, chosen_dir, confirming_tfs, tf_details
+        symbol, chosen_dir, confirming_tfs, tf_details, chosen_tf
     )
     
     if not filter_result:
@@ -536,8 +584,11 @@ def analyze_symbol(symbol):
                 breakdown_text += f"• {tf} (${details['price']:.4f}):\n"
                 breakdown_text += f"  Bull: {details['bull_score']:.1f} | Bear: {details['bear_score']:.1f}\n"
                 breakdown_text += f"  Bias: {details['bias'].upper()} | Vol: {'✅' if details['volume_ok'] else '❌'}\n"
-                breakdown_text += f"  CRT: {'🐮' if details['crt_bull'] else '🐻' if details['crt_bear'] else '➖'}\n"
-                breakdown_text += f"  Turtle: {'🐮' if details['turtle_bull'] else '🐻' if details['turtle_bear'] else '➖'}\n"
+                # Convert boolean to emoji for display
+                crt_icon = "🐮" if details['crt_bull'] else "🐻" if details['crt_bear'] else "➖"
+                turtle_icon = "🐮" if details['turtle_bull'] else "🐻" if details['turtle_bear'] else "➖"
+                breakdown_text += f"  CRT: {crt_icon}\n"
+                breakdown_text += f"  Turtle: {turtle_icon}\n"
     
     breakdown_text += f"\n🎯 SIGNAL SUMMARY:\n"
     breakdown_text += f"• Direction: {chosen_dir}\n"
@@ -545,7 +596,7 @@ def analyze_symbol(symbol):
     breakdown_text += f"• Confirming TFs: {', '.join(confirming_tfs)}\n"
     breakdown_text += f"• Confidence: {confidence_pct:.1f}%\n"
     breakdown_text += f"• Market Sentiment: {sentiment.upper()}\n"
-    breakdown_text += f"• Filter Status: PASSED (CRT-Turtle only) ✓\n"
+    breakdown_text += f"• Filter Status: PASSED (2-critical filters) ✓\n"
     
     # === STEP 9: SEND TRADE SIGNAL ===
     header = (f"✅ {chosen_dir} {symbol}\n"
@@ -556,7 +607,7 @@ def analyze_symbol(symbol):
               f"⚠ Risk: {risk_used*100:.2f}% | Confidence: {confidence_pct:.1f}%\n"
               f"🧾 TFs confirming: {', '.join(confirming_tfs)}\n"
               f"📈 Market Sentiment: {sentiment.upper()}\n"
-              f"🔍 FILTER: PASSED (CRT-Turtle only) ✓")
+              f"🔍 FILTER: PASSED (2-critical filters) ✓")
     
     # Send both messages
     send_message(header)
@@ -728,9 +779,10 @@ send_message("✅ SIRTS v10 PURE LOGIC DEPLOYED\n"
              "🎯 Target: 85%+ Accuracy\n"
              "📈 Timeframes: 15m, 30m, 1h, 4h\n"
              "📊 Sentiment: CoinGecko Global\n"
-             "🔍 1-RULE FILTER: CRT-Turtle Consensus ONLY\n"
-             "🚫 REJECTS: Mismatched CRT/Turtle signals\n"
-             "📈 VOLUME FILTER: DISABLED (for maximum profit)")
+             "🔍 2-CRITICAL FILTERS:\n"
+             "   1️⃣ 1-HOUR ALIGNMENT REQUIRED\n"
+             "   2️⃣ NO ADJACENT TF CONTRADICTION\n"
+             "🚫 REJECTS: Trades without 1h support or with adjacent contradictions")
 
 try:
     SYMBOLS = get_top_symbols(TOP_SYMBOLS)

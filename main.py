@@ -372,6 +372,187 @@ def volume_ok(df):
     current = df["volume"].iloc[-1]
     return current > ma * 1.3
 
+# ===== SWING DETECTION & TP/SL FUNCTIONS =====
+def detect_swings(df, min_distance=3):
+    """
+    Detect swing highs and lows
+    Returns: {'highs': [price1, price2...], 'lows': [price1, price2...]}
+    """
+    if len(df) < 50:
+        return {'highs': [], 'lows': []}
+    
+    highs = []
+    lows = []
+    
+    # Use a more robust swing detection
+    for i in range(min_distance, len(df) - min_distance):
+        # Check for swing high - local maximum
+        current_high = df['high'].iloc[i]
+        is_swing_high = True
+        
+        # Check left side
+        for j in range(1, min_distance + 1):
+            if current_high < df['high'].iloc[i - j]:
+                is_swing_high = False
+                break
+        
+        # Check right side
+        if is_swing_high:
+            for j in range(1, min_distance + 1):
+                if current_high < df['high'].iloc[i + j]:
+                    is_swing_high = False
+                    break
+        
+        if is_swing_high:
+            highs.append(current_high)
+        
+        # Check for swing low - local minimum
+        current_low = df['low'].iloc[i]
+        is_swing_low = True
+        
+        # Check left side
+        for j in range(1, min_distance + 1):
+            if current_low > df['low'].iloc[i - j]:
+                is_swing_low = False
+                break
+        
+        # Check right side
+        if is_swing_low:
+            for j in range(1, min_distance + 1):
+                if current_low > df['low'].iloc[i + j]:
+                    is_swing_low = False
+                    break
+        
+        if is_swing_low:
+            lows.append(current_low)
+    
+    # Return unique values, sorted
+    return {
+        'highs': sorted(list(set(highs))),
+        'lows': sorted(list(set(lows)))
+    }
+
+def get_swings_for_timeframe(symbol, timeframe):
+    """Get swings for specific timeframe"""
+    df = get_klines(symbol, timeframe, limit=200)
+    if df is None or len(df) < 50:
+        return {'highs': [], 'lows': []}
+    return detect_swings(df)
+
+def map_higher_tf(entry_tf):
+    """Map entry TF to higher timeframes for TP"""
+    mapping = {
+        '15m': {'tp1_tf': '30m', 'tp2_tf': '1h'},
+        '30m': {'tp1_tf': '1h', 'tp2_tf': '4h'},
+        '1h': {'tp1_tf': '4h', 'tp2_tf': '1d'},
+        '4h': {'tp1_tf': '1d', 'tp2_tf': '1w'}
+    }
+    return mapping.get(entry_tf, {'tp1_tf': '1h', 'tp2_tf': '4h'})
+
+def calculate_swing_tp_sl(entry_price, entry_tf, direction, symbol):
+    """
+    Calculate TP/SL based on swing structure
+    Returns: (sl, tp1, tp2, tp3, tp_sources) or None if no valid swings
+    """
+    # Get higher timeframe mapping
+    higher_tfs = map_higher_tf(entry_tf)
+    tp_sources = {}
+    
+    # Get swings for relevant timeframes
+    entry_swings = get_swings_for_timeframe(symbol, entry_tf)
+    tp1_swings = get_swings_for_timeframe(symbol, higher_tfs['tp1_tf'])
+    tp2_swings = get_swings_for_timeframe(symbol, higher_tfs['tp2_tf'])
+    
+    # Get ATR for padding only
+    atr = get_atr(symbol)
+    if atr is None:
+        atr = entry_price * 0.002  # Small padding only
+    
+    if direction == "BUY":
+        # TP1: Nearest swing high on X+1 TF
+        valid_highs_tp1 = [h for h in tp1_swings['highs'] if h > entry_price]
+        if not valid_highs_tp1:
+            return None  # NO FALLBACK - skip trade
+        
+        tp1 = min(valid_highs_tp1)  # Nearest swing high
+        tp_sources['tp1'] = f"{higher_tfs['tp1_tf']} swing"
+        
+        # TP2: Major swing high on X+2 TF
+        valid_highs_tp2 = [h for h in tp2_swings['highs'] if h > tp1]
+        if not valid_highs_tp2:
+            return None  # NO FALLBACK - skip trade
+        
+        tp2 = min(valid_highs_tp2)
+        tp_sources['tp2'] = f"{higher_tfs['tp2_tf']} swing"
+        
+        # NO TP3 - 2 TPs max in swing system
+        tp3 = None
+        tp_sources['tp3'] = "Not used"
+        
+        # SL: Below entry swing low + small ATR padding
+        entry_lows = entry_swings['lows']
+        if not entry_lows:
+            return None  # NO FALLBACK - skip trade
+        
+        # Find the most recent swing low below entry
+        valid_lows = [l for l in entry_lows if l < entry_price]
+        if not valid_lows:
+            return None  # NO FALLBACK - skip trade
+        
+        current_low = max(valid_lows)  # Highest low below entry (most recent)
+        sl = current_low - (atr * 0.2)  # Small padding only
+        tp_sources['sl'] = f"{entry_tf} swing"
+        
+        # Validate logical order
+        if not (sl < entry_price < tp1 < tp2):
+            return None  # Invalid structure
+        
+    else:  # SELL
+        # TP1: Nearest swing low on X+1 TF
+        valid_lows_tp1 = [l for l in tp1_swings['lows'] if l < entry_price]
+        if not valid_lows_tp1:
+            return None  # NO FALLBACK - skip trade
+        
+        tp1 = max(valid_lows_tp1)  # Nearest swing low
+        tp_sources['tp1'] = f"{higher_tfs['tp1_tf']} swing"
+        
+        # TP2: Major swing low on X+2 TF
+        valid_lows_tp2 = [l for l in tp2_swings['lows'] if l < tp1]
+        if not valid_lows_tp2:
+            return None  # NO FALLBACK - skip trade
+        
+        tp2 = max(valid_lows_tp2)
+        tp_sources['tp2'] = f"{higher_tfs['tp2_tf']} swing"
+        
+        # NO TP3 - 2 TPs max in swing system
+        tp3 = None
+        tp_sources['tp3'] = "Not used"
+        
+        # SL: Above entry swing high + small ATR padding
+        entry_highs = entry_swings['highs']
+        if not entry_highs:
+            return None  # NO FALLBACK - skip trade
+        
+        # Find the most recent swing high above entry
+        valid_highs = [h for h in entry_highs if h > entry_price]
+        if not valid_highs:
+            return None  # NO FALLBACK - skip trade
+        
+        current_high = min(valid_highs)  # Lowest high above entry (most recent)
+        sl = current_high + (atr * 0.2)  # Small padding only
+        tp_sources['sl'] = f"{entry_tf} swing"
+        
+        # Validate logical order
+        if not (tp2 < tp1 < entry_price < sl):
+            return None  # Invalid structure
+    
+    # Round values
+    tp1 = round(tp1, 8)
+    tp2 = round(tp2, 8)
+    sl = round(sl, 8)
+    
+    return sl, tp1, tp2, tp3, tp_sources, higher_tfs
+
 # ===== ATR & POSITION SIZING =====
 def get_atr(symbol, period=14):
     symbol = sanitize_symbol(symbol)
@@ -390,22 +571,20 @@ def get_atr(symbol, period=14):
         return None
     return max(float(np.mean(trs)), 1e-8)
 
-def trade_params(symbol, entry, side):
-    atr = get_atr(symbol)
-    if atr is None:
-        return None
-    atr = max(min(atr, entry * 0.05), entry * 0.0001)
-    if side == "BUY":
-        sl  = round(entry - atr * 1.7, 8)
-        tp1 = round(entry + atr * 1.8, 8)
-        tp2 = round(entry + atr * 2.8, 8)
-        tp3 = round(entry + atr * 3.8, 8)
-    else:
-        sl  = round(entry + atr * 1.7, 8)
-        tp1 = round(entry - atr * 1.8, 8)
-        tp2 = round(entry - atr * 2.8, 8)
-        tp3 = round(entry - atr * 3.8, 8)
-    return sl, tp1, tp2, tp3
+def trade_params(symbol, entry, side, entry_tf):
+    """
+    PURE SWING-BASED: No fallback to ATR
+    Returns parameters or None if no valid swings
+    """
+    # Get swing-based TP/SL
+    swing_result = calculate_swing_tp_sl(entry, entry_tf, side, symbol)
+    
+    if swing_result is None:
+        return None  # No valid swings found
+    
+    sl, tp1, tp2, tp3, tp_sources, higher_tfs = swing_result
+    
+    return sl, tp1, tp2, tp3, tp_sources, higher_tfs
 
 def pos_size_units(entry, sl):
     risk_percent = BASE_RISK
@@ -432,7 +611,8 @@ def init_csv():
             writer = csv.writer(f)
             writer.writerow([
                 "timestamp_utc","symbol","side","entry","tp1","tp2","tp3","sl",
-                "tf","units","margin_usd","exposure_usd","risk_pct","confidence_pct","status","breakdown"
+                "tf","units","margin_usd","exposure_usd","risk_pct","confidence_pct","status","breakdown",
+                "tp1_source","tp2_source","tp3_source","sl_source"
             ])
 
 def log_signal(row):
@@ -562,11 +742,15 @@ def analyze_symbol(symbol):
         skipped_signals += 1
         return False
     
-    tp_sl = trade_params(symbol, entry, chosen_dir)
-    if not tp_sl:
+    # PURE SWING-BASED: No fallback to ATR
+    tp_sl_result = trade_params(symbol, entry, chosen_dir, chosen_tf)
+    if tp_sl_result is None:
+        skip_log = f"🚫 NO SWINGS: {symbol} {chosen_dir} - No valid swing levels found on higher TFs"
+        print(skip_log)
         skipped_signals += 1
         return False
-    sl, tp1, tp2, tp3 = tp_sl
+    
+    sl, tp1, tp2, tp3, tp_sources, higher_tfs = tp_sl_result
     
     units, margin, exposure, risk_used = pos_size_units(entry, sl)
     if units <= 0:
@@ -590,6 +774,14 @@ def analyze_symbol(symbol):
                 breakdown_text += f"  CRT: {crt_icon}\n"
                 breakdown_text += f"  Turtle: {turtle_icon}\n"
     
+    # Add TP/SL sources to breakdown
+    breakdown_text += f"\n🎯 PURE SWING-BASED TP/SL:\n"
+    breakdown_text += f"• Entry TF: {chosen_tf}\n"
+    breakdown_text += f"• TP1 ({higher_tfs['tp1_tf']}): {tp_sources.get('tp1', 'Unknown')}\n"
+    breakdown_text += f"• TP2 ({higher_tfs['tp2_tf']}): {tp_sources.get('tp2', 'Unknown')}\n"
+    breakdown_text += f"• TP3: {tp_sources.get('tp3', 'Not used')}\n"
+    breakdown_text += f"• SL ({chosen_tf}): {tp_sources.get('sl', 'Unknown')}\n"
+    
     breakdown_text += f"\n🎯 SIGNAL SUMMARY:\n"
     breakdown_text += f"• Direction: {chosen_dir}\n"
     breakdown_text += f"• Confirmations: {tf_confirmations}/{len(TIMEFRAMES)} TFs\n"
@@ -597,17 +789,20 @@ def analyze_symbol(symbol):
     breakdown_text += f"• Confidence: {confidence_pct:.1f}%\n"
     breakdown_text += f"• Market Sentiment: {sentiment.upper()}\n"
     breakdown_text += f"• Filter Status: PASSED (2-critical filters) ✓\n"
+    breakdown_text += f"• TP System: PURE Swing-based (HTF > Entry TF, NO ATR fallback)"
     
     # === STEP 9: SEND TRADE SIGNAL ===
     header = (f"✅ {chosen_dir} {symbol}\n"
-              f"💵 Entry: {entry}\n"
-              f"🎯 TP1:{tp1} TP2:{tp2} TP3:{tp3}\n"
-              f"🛑 SL: {sl}\n"
+              f"💵 Entry: {entry} | TF: {chosen_tf}\n"
+              f"🎯 TP1: {tp1} ({tp_sources.get('tp1', 'Unknown')})\n"
+              f"🎯 TP2: {tp2} ({tp_sources.get('tp2', 'Unknown')})\n"
+              f"🛑 SL: {sl} ({tp_sources.get('sl', 'Unknown')})\n"
               f"💰 Units:{units} | Margin≈${margin} | Exposure≈${exposure}\n"
               f"⚠ Risk: {risk_used*100:.2f}% | Confidence: {confidence_pct:.1f}%\n"
               f"🧾 TFs confirming: {', '.join(confirming_tfs)}\n"
               f"📈 Market Sentiment: {sentiment.upper()}\n"
-              f"🔍 FILTER: PASSED (2-critical filters) ✓")
+              f"🔍 FILTER: PASSED (2-critical filters) ✓\n"
+              f"🎯 SYSTEM: PURE Swing-based (NO ATR fallback)")
     
     # Send both messages
     send_message(header)
@@ -620,7 +815,7 @@ def analyze_symbol(symbol):
         "entry": entry,
         "tp1": tp1,
         "tp2": tp2,
-        "tp3": tp3,
+        "tp3": None,  # No TP3 in swing system
         "sl": sl,
         "st": "open",
         "units": units,
@@ -635,20 +830,29 @@ def analyze_symbol(symbol):
         "placed_at": time.time(),
         "entry_tf": chosen_tf,
         "confirming_tfs": confirming_tfs,
-        "tf_details": tf_details
+        "tf_details": tf_details,
+        "tp_sources": tp_sources,
+        "higher_tfs": higher_tfs
     }
     
     open_trades.append(trade_obj)
     signals_sent_total += 1
     last_trade_time[symbol] = time.time() + 300  # 5-minute cooldown
     
+    # Log with sources
     log_signal([
         datetime.utcnow().isoformat(), symbol, chosen_dir, entry,
-        tp1, tp2, tp3, sl, chosen_tf, units, margin, exposure,
-        risk_used*100, confidence_pct, "open", str(tf_details)
+        tp1, tp2, "", sl, chosen_tf, units, margin, exposure,
+        risk_used*100, confidence_pct, "open", str(tf_details),
+        tp_sources.get('tp1', ''), tp_sources.get('tp2', ''), 
+        tp_sources.get('tp3', ''), tp_sources.get('sl', '')
     ])
     
     print(f"✅ Signal sent for {symbol} at {entry}. Confidence: {confidence_pct:.1f}%")
+    print(f"   TP1: {tp1} ({tp_sources.get('tp1', 'Unknown')})")
+    print(f"   TP2: {tp2} ({tp_sources.get('tp2', 'Unknown')})")
+    print(f"   SL: {sl} ({tp_sources.get('sl', 'Unknown')})")
+    print(f"   System: PURE Swing-based (NO ATR fallback)")
     return True
 
 # ===== TRADE CHECKING =====
@@ -662,17 +866,16 @@ def check_trades():
             continue
         
         side = t["side"]
+        tp_sources = t.get("tp_sources", {})
         
         # Generate detailed update message
         def send_update(message):
             details = (f"📊 UPDATE: {t['s']}\n"
-                      f"• Side: {t['side']}\n"
-                      f"• Entry: {t['entry']}\n"
-                      f"• Current: {p}\n"
-                      f"• P/L: {(p - t['entry']) / t['entry'] * 100:.2f}%\n"
-                      f"• Sentiment: {t['sentiment'].upper()}\n"
-                      f"• Confidence: {t['confidence_pct']:.1f}%\n"
-                      f"• TFs: {', '.join(t['confirming_tfs'])}\n"
+                      f"• Side: {t['side']} | Entry: {t['entry']} | TF: {t['entry_tf']}\n"
+                      f"• Current: {p} | P/L: {(p - t['entry']) / t['entry'] * 100:.2f}%\n"
+                      f"• TP1 Source: {tp_sources.get('tp1', 'Unknown')}\n"
+                      f"• TP2 Source: {tp_sources.get('tp2', 'Unknown')}\n"
+                      f"• SL Source: {tp_sources.get('sl', 'Unknown')}\n"
                       f"{message}")
             send_message(details)
         
@@ -686,14 +889,8 @@ def check_trades():
                 continue
             if t["tp1_taken"] and not t["tp2_taken"] and p >= t["tp2"]:
                 t["tp2_taken"] = True
-                send_update(f"🎯 TP2 HIT at {p}")
-                signals_hit_total += 1
-                last_trade_time[t["s"]] = time.time() + 900
-                continue
-            if t["tp2_taken"] and not t["tp3_taken"] and p >= t["tp3"]:
-                t["tp3_taken"] = True
                 t["st"] = "closed"
-                send_update(f"🏁 TP3 HIT at {p} → TRADE CLOSED")
+                send_update(f"🏁 TP2 HIT at {p} → TRADE CLOSED")
                 signals_hit_total += 1
                 last_trade_time[t["s"]] = time.time() + 900
                 continue
@@ -719,14 +916,8 @@ def check_trades():
                 continue
             if t["tp1_taken"] and not t["tp2_taken"] and p <= t["tp2"]:
                 t["tp2_taken"] = True
-                send_update(f"🎯 TP2 HIT at {p}")
-                signals_hit_total += 1
-                last_trade_time[t["s"]] = time.time() + 900
-                continue
-            if t["tp2_taken"] and not t["tp3_taken"] and p <= t["tp3"]:
-                t["tp3_taken"] = True
                 t["st"] = "closed"
-                send_update(f"🏁 TP3 HIT at {p} → TRADE CLOSED")
+                send_update(f"🏁 TP2 HIT at {p} → TRADE CLOSED")
                 signals_hit_total += 1
                 last_trade_time[t["s"]] = time.time() + 900
                 continue
@@ -768,7 +959,9 @@ def summary():
                        f"🎯 Accuracy Rate: {acc:.1f}%\n"
                        f"💵 Capital: ${CAPITAL}\n"
                        f"🎚️ Leverage: {LEVERAGE}x\n"
-                       f"⚠️ Risk per Trade: {BASE_RISK*100:.1f}%")
+                       f"⚠️ Risk per Trade: {BASE_RISK*100:.1f}%\n"
+                       f"🎯 TP System: PURE Swing-based (HTF > Entry TF)\n"
+                       f"🚫 NO ATR FALLBACK: Trades skipped if no swings found")
     
     send_message(detailed_summary)
     print(f"📊 Daily Summary. Accuracy: {acc:.1f}%")
@@ -779,6 +972,13 @@ send_message("✅ SIRTS v10 PURE LOGIC DEPLOYED\n"
              "🎯 Target: 85%+ Accuracy\n"
              "📈 Timeframes: 15m, 30m, 1h, 4h\n"
              "📊 Sentiment: CoinGecko Global\n"
+             "🎯 PURE SWING-BASED TP/SL SYSTEM:\n"
+             "   • TP from HIGHER timeframe than entry\n"
+             "   • TP1: X+1 TF swing\n"
+             "   • TP2: X+2 TF swing\n"
+             "   • SL: Entry TF swing + small ATR padding\n"
+             "   • 🚫 NO ATR FALLBACK - Skip if no swings\n"
+             "   • Shows source in breakdown\n"
              "🔍 2-CRITICAL FILTERS:\n"
              "   1️⃣ 1-HOUR ALIGNMENT REQUIRED\n"
              "   2️⃣ NO ADJACENT TF CONTRADICTION\n"

@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-ROMEOTPT SCANNER v2 - Complete with TP/SL Tracking & Notifications
-Min Score: 2.0
-"""
+
 
 import os
 import time

@@ -41,7 +41,7 @@ WEIGHT_VOLUME = 0.10    # Volume
 MIN_TF_SCORE  = 25      # Very low to collect all data
 CONF_MIN_TFS  = 1       # Minimum possible
 CONFIDENCE_MIN = 25.0   # Very low to collect all data
-TOP_SYMBOLS = 60        # Number of symbols to monitor
+TOP_SYMBOLS = 40        # Number of symbols to monitor
 
 # ===== BYBIT PUBLIC ENDPOINTS =====
 BYBIT_KLINES = "https://api.bybit.com/v5/market/kline"

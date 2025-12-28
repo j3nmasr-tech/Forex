@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# SIRTS v11 - WORLD-CLASS TP/SL EDITION
+# SIRTS v11 - WORLD-CLASS TP/SL EDITION (NO ATR FALLBACK)
 # Core principles:
 # 1. SL = Structural Invalidation ONLY
-# 2. TP = Liquidity Targets ONLY
+# 2. TP = Liquidity Targets ONLY (NO TRADE IF NO LIQUIDITY)
 # 3. No forced TP3, conditional only
 # 4. SL distance must be <= 40% of TP2 distance
+# 5. REJECT TRADE IF NO LIQUIDITY TARGETS FOUND
 
 import os
 import re
@@ -50,14 +51,13 @@ MAX_SL_TP_RATIO = 0.4  # SL distance <= 40% of TP2 distance
 ATR_PADDING_FACTOR = 0.35  # ATR padding for SL (0.25-0.5)
 TP1_SIZE_RATIO = 0.3  # Take 30% at TP1
 TP2_SIZE_RATIO = 0.7  # Take 70% at TP2 (main target)
-MIN_TP_SL_RATIO = 2.0  # Minimum 1:2 RR for TP2
 
 # ===== BYBIT ENDPOINTS =====
 BYBIT_KLINES = "https://api.bybit.com/v5/market/kline"
 BYBIT_TICKERS = "https://api.bybit.com/v5/market/tickers"
 COINGECKO_GLOBAL = "https://api.coingecko.com/api/v3/global"
 
-LOG_CSV = "./sirts_v11_world_class.csv"
+LOG_CSV = "./sirts_v11_no_atr_fallback.csv"
 
 # ===== CACHE =====
 SENTIMENT_CACHE = {"data": None, "timestamp": 0}
@@ -376,7 +376,7 @@ def find_liquidity_levels(df, higher_tf, direction):
     """
     targets = []
     
-    # Internal liquidity (TP1)
+    # Internal liquidity (TP1) - Entry timeframe
     if len(df) >= 30:
         if direction == "BUY":
             # Look for equal highs (previous minor highs)
@@ -463,10 +463,12 @@ def calculate_sl_tp_world_class(symbol, entry_price, direction, entry_tf):
     3. TP2 at external liquidity (HTF)
     4. TP3 only if strong trend and liquidity beyond
     5. Validate SL <= 40% of TP2 distance
+    6. REJECT TRADE IF NO LIQUIDITY TARGETS FOUND
     """
     # Get entry TF data for structure
     entry_df = get_klines(symbol, entry_tf, limit=100)
     if entry_df is None or len(entry_df) < 50:
+        print(f"❌ Insufficient entry data for {symbol} {entry_tf}")
         return None
     
     # Get higher TF for liquidity targets
@@ -476,7 +478,7 @@ def calculate_sl_tp_world_class(symbol, entry_price, direction, entry_tf):
         higher_tf = TIMEFRAMES[tf_index + 1]
         higher_tf_data = get_klines(symbol, higher_tf, limit=100)
     
-    # Get ATR for padding
+    # Get ATR for padding (for SL only)
     atr = get_atr(symbol)
     if atr is None:
         atr = entry_price * 0.005
@@ -493,10 +495,9 @@ def calculate_sl_tp_world_class(symbol, entry_price, direction, entry_tf):
             structural_sl = valid_swing_lows[0]['price']
             sl_source = f"{entry_tf} swing low"
         else:
-            # Fallback: Below recent low
-            recent_low = entry_df['low'].iloc[-20:].min()
-            structural_sl = recent_low if recent_low < entry_price else entry_price * 0.985
-            sl_source = f"{entry_tf} recent low"
+            # No structural level found - REJECT TRADE
+            print(f"❌ No structural SL level found for {symbol} {direction}")
+            return None
         
         # Add ATR padding BELOW structure
         sl = structural_sl - (atr * ATR_PADDING_FACTOR)
@@ -510,16 +511,20 @@ def calculate_sl_tp_world_class(symbol, entry_price, direction, entry_tf):
             structural_sl = valid_swing_highs[0]['price']
             sl_source = f"{entry_tf} swing high"
         else:
-            # Fallback: Above recent high
-            recent_high = entry_df['high'].iloc[-20:].max()
-            structural_sl = recent_high if recent_high > entry_price else entry_price * 1.015
-            sl_source = f"{entry_tf} recent high"
+            # No structural level found - REJECT TRADE
+            print(f"❌ No structural SL level found for {symbol} {direction}")
+            return None
         
         # Add ATR padding ABOVE structure
         sl = structural_sl + (atr * ATR_PADDING_FACTOR)
     
     # ===== 2. FIND LIQUIDITY TARGETS =====
     liquidity_targets = find_liquidity_levels(entry_df, higher_tf_data, direction)
+    
+    if not liquidity_targets:
+        # NO LIQUIDITY TARGETS FOUND - REJECT TRADE
+        print(f"❌ No liquidity targets found for {symbol} {direction} - REJECTING TRADE")
+        return None
     
     tp1 = None
     tp2 = None
@@ -532,6 +537,11 @@ def calculate_sl_tp_world_class(symbol, entry_price, direction, entry_tf):
     tp1_candidates = [t for t in liquidity_targets if t['priority'] == 'tp1']
     tp2_candidates = [t for t in liquidity_targets if t['priority'] == 'tp2']
     
+    # ===== CRITICAL: MUST HAVE TP2 (Main Liquidity Target) =====
+    if not tp2_candidates:
+        print(f"❌ No external liquidity (TP2) found for {symbol} - REJECTING TRADE")
+        return None
+    
     if direction == "BUY":
         # TP1: Internal liquidity (closest reasonable target)
         if tp1_candidates:
@@ -539,22 +549,18 @@ def calculate_sl_tp_world_class(symbol, entry_price, direction, entry_tf):
             if valid_tp1:
                 tp1 = valid_tp1[0]['price']
                 tp1_source = f"internal liquidity ({valid_tp1[0]['type']})"
-        elif tp2_candidates:
-            # Use closest TP2 candidate scaled down
-            closest_tp2 = min(tp2_candidates, key=lambda x: x['price'])
-            distance = closest_tp2['price'] - entry_price
-            tp1 = entry_price + (distance * 0.3)  # 30% of TP2 distance
-            tp1_source = "scaled_from_tp2"
         
-        # TP2: External liquidity (main target)
-        if tp2_candidates:
-            valid_tp2 = [t for t in tp2_candidates if t['price'] > entry_price * 1.01]
-            if valid_tp2:
-                tp2 = valid_tp2[0]['price']
-                tp2_source = f"external liquidity ({valid_tp2[0]['type']})"
+        # TP2: External liquidity (main target) - MUST EXIST
+        valid_tp2 = [t for t in tp2_candidates if t['price'] > entry_price * 1.01]
+        if not valid_tp2:
+            print(f"❌ No valid external liquidity above entry for {symbol} - REJECTING TRADE")
+            return None
+        
+        tp2 = valid_tp2[0]['price']
+        tp2_source = f"external liquidity ({valid_tp2[0]['type']})"
         
         # TP3: Only if strong trend and more liquidity beyond TP2
-        if tp2 and entry_df['close'].iloc[-1] > entry_df['close'].iloc[-50:].mean():
+        if entry_df['close'].iloc[-1] > entry_df['close'].iloc[-50:].mean():
             # Check for even higher HTF levels
             if tf_index < len(TIMEFRAMES) - 2:
                 even_higher_tf = TIMEFRAMES[tf_index + 2]
@@ -574,22 +580,18 @@ def calculate_sl_tp_world_class(symbol, entry_price, direction, entry_tf):
             if valid_tp1:
                 tp1 = valid_tp1[0]['price']
                 tp1_source = f"internal liquidity ({valid_tp1[0]['type']})"
-        elif tp2_candidates:
-            # Use closest TP2 candidate scaled down
-            closest_tp2 = min(tp2_candidates, key=lambda x: x['price'])
-            distance = entry_price - closest_tp2['price']
-            tp1 = entry_price - (distance * 0.3)
-            tp1_source = "scaled_from_tp2"
         
-        # TP2: External liquidity (main target)
-        if tp2_candidates:
-            valid_tp2 = [t for t in tp2_candidates if t['price'] < entry_price * 0.99]
-            if valid_tp2:
-                tp2 = valid_tp2[0]['price']
-                tp2_source = f"external liquidity ({valid_tp2[0]['type']})"
+        # TP2: External liquidity (main target) - MUST EXIST
+        valid_tp2 = [t for t in tp2_candidates if t['price'] < entry_price * 0.99]
+        if not valid_tp2:
+            print(f"❌ No valid external liquidity below entry for {symbol} - REJECTING TRADE")
+            return None
+        
+        tp2 = valid_tp2[0]['price']
+        tp2_source = f"external liquidity ({valid_tp2[0]['type']})"
         
         # TP3: Only if strong trend
-        if tp2 and entry_df['close'].iloc[-1] < entry_df['close'].iloc[-50:].mean():
+        if entry_df['close'].iloc[-1] < entry_df['close'].iloc[-50:].mean():
             if tf_index < len(TIMEFRAMES) - 2:
                 even_higher_tf = TIMEFRAMES[tf_index + 2]
                 even_higher_data = get_klines(symbol, even_higher_tf, limit=100)
@@ -601,22 +603,13 @@ def calculate_sl_tp_world_class(symbol, entry_price, direction, entry_tf):
                             tp3 = lowest_target['price']
                             tp3_source = f"{even_higher_tf} swing low"
     
-    # ===== 3. ATR FALLBACK (ONLY IF NO LIQUIDITY FOUND) =====
-    if tp1 is None or tp2 is None:
-        if direction == "BUY":
-            if tp1 is None:
-                tp1 = entry_price + (atr * 1.5)
-                tp1_source = "ATR_fallback"
-            if tp2 is None:
-                tp2 = entry_price + (atr * 2.5)
-                tp2_source = "ATR_fallback"
-        else:  # SELL
-            if tp1 is None:
-                tp1 = entry_price - (atr * 1.5)
-                tp1_source = "ATR_fallback"
-            if tp2 is None:
-                tp2 = entry_price - (atr * 2.5)
-                tp2_source = "ATR_fallback"
+    # ===== 3. NO TP1 FALLBACK - If no TP1, don't create artificial one =====
+    # Only trade if we have BOTH structural SL AND liquidity TP
+    if tp1 is None:
+        # Don't create artificial TP1 - just skip it, we still have TP2
+        tp1 = None
+        tp1_source = "none"
+        print(f"⚠️ No internal liquidity (TP1) found for {symbol}, proceeding with TP2 only")
     
     # ===== 4. VALIDATE WORLD-CLASS RULE: SL <= 40% of TP2 distance =====
     if tp2 is not None:
@@ -636,9 +629,7 @@ def calculate_sl_tp_world_class(symbol, entry_price, direction, entry_tf):
                     if new_tp2 > tp2:
                         tp2 = new_tp2
                         tp2_source = f"adjusted_for_ratio ({tp2_source.split('(')[0]})"
-                    
-                    # Log the adjustment
-                    print(f"⚠️ Adjusted TP2 for ratio compliance: {ratio:.2f} -> {MAX_SL_TP_RATIO}")
+                        print(f"⚠️ Adjusted TP2 for ratio compliance: {ratio:.2f} -> {MAX_SL_TP_RATIO}")
         else:  # SELL
             sl_distance = sl - entry_price
             tp2_distance = entry_price - tp2
@@ -653,36 +644,31 @@ def calculate_sl_tp_world_class(symbol, entry_price, direction, entry_tf):
                     if new_tp2 < tp2:
                         tp2 = new_tp2
                         tp2_source = f"adjusted_for_ratio ({tp2_source.split('(')[0]})"
-                    
-                    print(f"⚠️ Adjusted TP2 for ratio compliance: {ratio:.2f} -> {MAX_SL_TP_RATIO}")
+                        print(f"⚠️ Adjusted TP2 for ratio compliance: {ratio:.2f} -> {MAX_SL_TP_RATIO}")
     
     # ===== 5. FINAL VALIDATION =====
     # Ensure logical order
     if direction == "BUY":
-        if not (sl < entry_price < tp1 < tp2):
-            # Reset to safe defaults
-            sl = entry_price - (atr * 1.5)
-            tp1 = entry_price + (atr * 1.8)
-            tp2 = entry_price + (atr * 2.8)
-            tp3 = None
-            sl_source = "validation_fallback"
-            tp1_source = "validation_fallback"
-            tp2_source = "validation_fallback"
+        if not (sl < entry_price < tp2):
+            print(f"❌ Invalid TP/SL levels for {symbol}: SL={sl}, Entry={entry_price}, TP2={tp2}")
+            return None
+        if tp1 and not (entry_price < tp1 < tp2):
+            tp1 = None  # Invalid TP1, remove it
+            tp1_source = "none"
     else:  # SELL
-        if not (sl > entry_price > tp1 > tp2):
-            sl = entry_price + (atr * 1.5)
-            tp1 = entry_price - (atr * 1.8)
-            tp2 = entry_price - (atr * 2.8)
-            tp3 = None
-            sl_source = "validation_fallback"
-            tp1_source = "validation_fallback"
-            tp2_source = "validation_fallback"
+        if not (sl > entry_price > tp2):
+            print(f"❌ Invalid TP/SL levels for {symbol}: SL={sl}, Entry={entry_price}, TP2={tp2}")
+            return None
+        if tp1 and not (entry_price > tp1 > tp2):
+            tp1 = None
+            tp1_source = "none"
     
     # Round values
     sl = round(sl, 8)
-    tp1 = round(tp1, 8)
+    if tp1:
+        tp1 = round(tp1, 8)
     tp2 = round(tp2, 8)
-    if tp3 is not None:
+    if tp3:
         tp3 = round(tp3, 8)
     
     # Prepare source dictionary
@@ -704,6 +690,7 @@ def calculate_sl_tp_world_class(symbol, entry_price, direction, entry_tf):
     ratio = sl_dist / tp2_dist if tp2_dist > 0 else 0
     
     print(f"📊 TP/SL Ratio: {ratio:.2f} (max allowed: {MAX_SL_TP_RATIO})")
+    print(f"✅ Found valid liquidity targets for {symbol}")
     
     return sl, tp1, tp2, tp3, tp_sources
 
@@ -711,10 +698,12 @@ def calculate_sl_tp_world_class(symbol, entry_price, direction, entry_tf):
 def trade_params(symbol, entry, side, entry_tf):
     """
     WORLD-CLASS version using structural invalidation and liquidity targets
+    REJECTS TRADE IF NO LIQUIDITY FOUND
     """
     # Get world-class TP/SL levels
     result = calculate_sl_tp_world_class(symbol, entry, side, entry_tf)
     if not result:
+        print(f"❌ Trade rejected for {symbol}: No valid TP/SL structure found")
         return None
     
     sl, tp1, tp2, tp3, tp_sources = result
@@ -754,10 +743,6 @@ def pos_size_units_world_class(entry, sl, tp2, direction):
     if ratio > MAX_SL_TP_RATIO:
         print(f"❌ Trade rejected: SL/TP2 ratio {ratio:.2f} > {MAX_SL_TP_RATIO}")
         return 0.0, 0.0, 0.0, 0.0
-    
-    # Check minimum RR
-    if tp2_distance / sl_distance < MIN_TP_SL_RATIO:
-        print(f"⚠️ Warning: RR ratio {tp2_distance/sl_distance:.2f} < minimum {MIN_TP_SL_RATIO}")
     
     # Standard position sizing
     risk_percent = BASE_RISK
@@ -799,7 +784,7 @@ def init_csv():
             writer.writerow([
                 "timestamp_utc","symbol","side","entry","tp1","tp2","tp3","sl",
                 "tf","units","margin_usd","exposure_usd","risk_pct","confidence_pct","status","breakdown",
-                "tp1_source","tp2_source","tp3_source","sl_source", "sl_tp2_ratio"
+                "tp1_source","tp2_source","tp3_source","sl_source", "sl_tp2_ratio", "reject_reason"
             ])
 
 def log_signal(row):
@@ -910,6 +895,13 @@ def analyze_symbol(symbol):
         # Log the filtered signal
         filter_log = f"🚫 FILTERED: {symbol} {chosen_dir} - {filter_reason}"
         print(filter_log)
+        # Log rejection to CSV
+        log_signal([
+            datetime.utcnow().isoformat(), symbol, chosen_dir, 0,
+            0, 0, 0, 0, chosen_tf, 0, 0, 0,
+            0, confidence_pct, "rejected", str(tf_details),
+            "", "", "", "", 0, filter_reason
+        ])
         skipped_signals += 1
         return False
     
@@ -917,6 +909,12 @@ def analyze_symbol(symbol):
     if not is_first_entry(symbol):
         filter_log = f"🚫 FILTERED: {symbol} - Already have open position"
         print(filter_log)
+        log_signal([
+            datetime.utcnow().isoformat(), symbol, chosen_dir, 0,
+            0, 0, 0, 0, chosen_tf, 0, 0, 0,
+            0, confidence_pct, "rejected", str(tf_details),
+            "", "", "", "", 0, "already_have_position"
+        ])
         skipped_signals += 1
         return False
     
@@ -929,11 +927,19 @@ def analyze_symbol(symbol):
         skipped_signals += 1
         return False
     
-    # Get world-class TP/SL levels
+    # Get world-class TP/SL levels - THIS WILL REJECT IF NO LIQUIDITY
     tp_sl_result = trade_params(symbol, entry, chosen_dir, chosen_tf)
     if not tp_sl_result:
+        # Log rejection due to no liquidity
+        log_signal([
+            datetime.utcnow().isoformat(), symbol, chosen_dir, entry,
+            0, 0, 0, 0, chosen_tf, 0, 0, 0,
+            0, confidence_pct, "rejected", str(tf_details),
+            "", "", "", "", 0, "no_liquidity_targets"
+        ])
         skipped_signals += 1
         return False
+    
     sl, tp1, tp2, tp3, tp_sources, higher_tfs = tp_sl_result
     
     # World-class position sizing with ratio validation
@@ -942,6 +948,13 @@ def analyze_symbol(symbol):
     )
     
     if units <= 0:
+        log_signal([
+            datetime.utcnow().isoformat(), symbol, chosen_dir, entry,
+            tp1 or 0, tp2, tp3 or 0, sl, chosen_tf, 0, 0, 0,
+            0, confidence_pct, "rejected", str(tf_details),
+            tp_sources.get('tp1', ''), tp_sources.get('tp2', ''), 
+            tp_sources.get('tp3', ''), tp_sources.get('sl', ''), 0, "position_size_zero"
+        ])
         skipped_signals += 1
         return False
     
@@ -975,11 +988,15 @@ def analyze_symbol(symbol):
     # Add WORLD-CLASS TP/SL breakdown
     breakdown_text += f"\n🎯 WORLD-CLASS TP/SL SYSTEM:\n"
     breakdown_text += f"• SL: {tp_sources.get('sl', 'Unknown')}\n"
-    breakdown_text += f"• TP1 (30%): {tp_sources.get('tp1', 'Unknown')}\n"
+    if tp1:
+        breakdown_text += f"• TP1 (30%): {tp_sources.get('tp1', 'Unknown')}\n"
+    else:
+        breakdown_text += f"• TP1: ❌ No internal liquidity found\n"
     breakdown_text += f"• TP2 (70%): {tp_sources.get('tp2', 'Unknown')}\n"
     if tp3:
         breakdown_text += f"• TP3 (optional): {tp_sources.get('tp3', 'Unknown')}\n"
     breakdown_text += f"• SL/TP2 Ratio: {ratio:.2f} (max: {MAX_SL_TP_RATIO}) {'✅' if ratio <= MAX_SL_TP_RATIO else '❌'}\n"
+    breakdown_text += f"• 🚫 NO ATR FALLBACK - Trade rejected if no liquidity\n"
     
     breakdown_text += f"\n🎯 SIGNAL SUMMARY:\n"
     breakdown_text += f"• Direction: {chosen_dir}\n"
@@ -991,9 +1008,14 @@ def analyze_symbol(symbol):
     
     # === STEP 9: SEND TRADE SIGNAL ===
     header = (f"✅ {chosen_dir} {symbol}\n"
-              f"💵 Entry: {entry} | TF: {chosen_tf}\n"
-              f"🎯 TP1 (30%): {tp1} ({tp_sources.get('tp1', 'Unknown')})\n"
-              f"🎯 TP2 (70%): {tp2} ({tp_sources.get('tp2', 'Unknown')})\n")
+              f"💵 Entry: {entry} | TF: {chosen_tf}\n")
+    
+    if tp1:
+        header += f"🎯 TP1 (30%): {tp1} ({tp_sources.get('tp1', 'Unknown')})\n"
+    else:
+        header += f"🎯 TP1: ❌ No internal liquidity\n"
+    
+    header += f"🎯 TP2 (70%): {tp2} ({tp_sources.get('tp2', 'Unknown')})\n"
     
     if tp3:
         header += f"🎯 TP3 (optional): {tp3} ({tp_sources.get('tp3', 'Unknown')})\n"
@@ -1035,8 +1057,8 @@ def analyze_symbol(symbol):
         "tf_details": tf_details,
         "tp_sources": tp_sources,
         "higher_tfs": higher_tfs,
-        "tp1_units": units * TP1_SIZE_RATIO,  # Take 30% at TP1
-        "tp2_units": units * TP2_SIZE_RATIO,  # Take 70% at TP2
+        "tp1_units": units * TP1_SIZE_RATIO if tp1 else 0,  # Take 30% at TP1 if exists
+        "tp2_units": units * TP2_SIZE_RATIO if tp1 else units,  # All at TP2 if no TP1
         "tp3_units": 0.0,  # Optional runner
         "remaining_units": units
     }
@@ -1048,14 +1070,15 @@ def analyze_symbol(symbol):
     # Log with sources and ratio
     log_signal([
         datetime.utcnow().isoformat(), symbol, chosen_dir, entry,
-        tp1, tp2, tp3, sl, chosen_tf, units, margin, exposure,
+        tp1 or 0, tp2, tp3 or 0, sl, chosen_tf, units, margin, exposure,
         risk_used*100, confidence_pct, "open", str(tf_details),
         tp_sources.get('tp1', ''), tp_sources.get('tp2', ''), 
-        tp_sources.get('tp3', ''), tp_sources.get('sl', ''), ratio
+        tp_sources.get('tp3', ''), tp_sources.get('sl', ''), ratio, ""
     ])
     
     print(f"✅ Signal sent for {symbol} at {entry}. Confidence: {confidence_pct:.1f}%")
-    print(f"   TP1 (30%): {tp1} ({tp_sources.get('tp1', 'Unknown')})")
+    if tp1:
+        print(f"   TP1 (30%): {tp1} ({tp_sources.get('tp1', 'Unknown')})")
     print(f"   TP2 (70%): {tp2} ({tp_sources.get('tp2', 'Unknown')})")
     print(f"   SL: {sl} ({tp_sources.get('sl', 'Unknown')})")
     print(f"   Ratio: {ratio:.2f} (max: {MAX_SL_TP_RATIO})")
@@ -1086,8 +1109,8 @@ def check_trades():
             send_message(details)
         
         if side == "BUY":
-            # TP1 Hit - Take 30% position
-            if not t["tp1_taken"] and p >= t["tp1"]:
+            # TP1 Hit - Take 30% position if TP1 exists
+            if t["tp1"] and not t["tp1_taken"] and p >= t["tp1"]:
                 t["tp1_taken"] = True
                 t["remaining_units"] = t["units"] * 0.7  # Keep 70% for TP2
                 # Move SL to breakeven for remaining position
@@ -1097,11 +1120,11 @@ def check_trades():
                 last_trade_time[t["s"]] = time.time() + 900
                 continue
             
-            # TP2 Hit - Take 70% position, close trade
-            if t["tp1_taken"] and not t["tp2_taken"] and p >= t["tp2"]:
+            # TP2 Hit - Take 70% position (or 100% if no TP1), close trade
+            if (not t["tp1"] or t["tp1_taken"]) and not t["tp2_taken"] and p >= t["tp2"]:
                 t["tp2_taken"] = True
                 t["st"] = "closed"
-                send_update(f"🏁 TP2 HIT at {p} → 70% taken, TRADE CLOSED")
+                send_update(f"🏁 TP2 HIT at {p} → {'70%' if t['tp1'] else '100%'} taken, TRADE CLOSED")
                 signals_hit_total += 1
                 last_trade_time[t["s"]] = time.time() + 900
                 continue
@@ -1129,7 +1152,7 @@ def check_trades():
         
         else:  # SELL
             # TP1 Hit
-            if not t["tp1_taken"] and p <= t["tp1"]:
+            if t["tp1"] and not t["tp1_taken"] and p <= t["tp1"]:
                 t["tp1_taken"] = True
                 t["remaining_units"] = t["units"] * 0.7
                 t["sl"] = t["entry"]
@@ -1139,10 +1162,10 @@ def check_trades():
                 continue
             
             # TP2 Hit
-            if t["tp1_taken"] and not t["tp2_taken"] and p <= t["tp2"]:
+            if (not t["tp1"] or t["tp1_taken"]) and not t["tp2_taken"] and p <= t["tp2"]:
                 t["tp2_taken"] = True
                 t["st"] = "closed"
-                send_update(f"🏁 TP2 HIT at {p} → 70% taken, TRADE CLOSED")
+                send_update(f"🏁 TP2 HIT at {p} → {'70%' if t['tp1'] else '100%'} taken, TRADE CLOSED")
                 signals_hit_total += 1
                 last_trade_time[t["s"]] = time.time() + 900
                 continue
@@ -1184,53 +1207,64 @@ def summary():
     breakev = signals_breakeven
     acc   = (hits / total * 100) if total > 0 else 0.0
     
-    # Calculate average ratio from logs
-    avg_ratio = 0.0
-    ratio_count = 0
+    # Calculate rejection reasons
+    rejections = {
+        "no_liquidity": 0,
+        "no_structure": 0,
+        "ratio_too_high": 0,
+        "filtered": 0
+    }
+    
     try:
         with open(LOG_CSV, 'r') as f:
             reader = csv.DictReader(f)
             for row in reader:
-                if row.get('sl_tp2_ratio'):
-                    try:
-                        avg_ratio += float(row['sl_tp2_ratio'])
-                        ratio_count += 1
-                    except:
-                        pass
-        if ratio_count > 0:
-            avg_ratio = avg_ratio / ratio_count
+                if row.get('status') == 'rejected':
+                    reason = row.get('reject_reason', '')
+                    if 'liquidity' in reason.lower():
+                        rejections["no_liquidity"] += 1
+                    elif 'structure' in reason.lower():
+                        rejections["no_structure"] += 1
+                    elif 'ratio' in reason.lower():
+                        rejections["ratio_too_high"] += 1
+                    else:
+                        rejections["filtered"] += 1
     except:
-        avg_ratio = 0.0
+        pass
     
     detailed_summary = (f"📊 DAILY PERFORMANCE SUMMARY\n"
                        f"Signals Sent: {total}\n"
                        f"Signals Checked: {total_checked_signals}\n"
                        f"Signals Skipped: {skipped_signals}\n"
-                       f"✅ Wins (Full Profit): {hits}\n"
+                       f"✅ Wins: {hits}\n"
                        f"⚖️ Breakevens: {breakev}\n"
                        f"❌ Losses: {fails}\n"
                        f"🎯 Accuracy Rate: {acc:.1f}%\n"
-                       f"📊 Avg SL/TP2 Ratio: {avg_ratio:.2f} (target: ≤{MAX_SL_TP_RATIO})\n"
-                       f"💵 Capital: ${CAPITAL}\n"
+                       f"\n🚫 REJECTION BREAKDOWN:\n"
+                       f"• No Liquidity Targets: {rejections['no_liquidity']}\n"
+                       f"• No Structural SL: {rejections['no_structure']}\n"
+                       f"• Ratio Too High: {rejections['ratio_too_high']}\n"
+                       f"• Filtered: {rejections['filtered']}\n"
+                       f"\n💵 Capital: ${CAPITAL}\n"
                        f"🎚️ Leverage: {LEVERAGE}x\n"
                        f"⚠️ Risk per Trade: {BASE_RISK*100:.1f}%\n"
-                       f"🎯 TP System: WORLD-CLASS (Structural SL, Liquidity TP)\n"
-                       f"📈 Position Sizing: 30% at TP1, 70% at TP2")
+                       f"🎯 TP System: WORLD-CLASS (NO ATR FALLBACK)\n"
+                       f"📈 Position Sizing: {'30%/70%' if TP1_SIZE_RATIO > 0 else '100% at TP2'}")
     
     send_message(detailed_summary)
-    print(f"📊 Daily Summary. Accuracy: {acc:.1f}%, Avg Ratio: {avg_ratio:.2f}")
+    print(f"📊 Daily Summary. Accuracy: {acc:.1f}%, Rejections: {rejections}")
 
 # ===== STARTUP =====
 init_csv()
-send_message("✅ SIRTS v11 - WORLD-CLASS TP/SL EDITION\n"
+send_message("✅ SIRTS v11 - WORLD-CLASS TP/SL EDITION (NO ATR FALLBACK)\n"
              "🎯 Core Principles:\n"
              "1. SL = Structural Invalidation ONLY\n"
              "2. TP = Liquidity Targets ONLY\n"
-             "3. No forced TP3, conditional only\n"
+             "3. ❌ NO ATR FALLBACK - Reject trade if no liquidity\n"
              "4. SL distance ≤ 40% of TP2 distance\n"
-             "📊 Position Sizing: 30% at TP1, 70% at TP2\n"
-             "⚠️ RATIO FILTER: Rejects trades where SL > 40% of TP2 distance\n"
-             "🔥 Expected: Eliminates 90% of bad trades, maximizes RR")
+             "📊 Position Sizing: 30% at TP1 (if exists), 70% at TP2\n"
+             "⚠️ STRICT: Rejects trades without structural SL or liquidity TP\n"
+             "🔥 Expected: Only takes HIGH QUALITY trades with clear structure")
 
 try:
     SYMBOLS = get_top_symbols(TOP_SYMBOLS)

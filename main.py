@@ -41,7 +41,7 @@ WEIGHT_VOLUME = 0.10    # Volume
 MIN_TF_SCORE  = 25      # Same as v10
 CONF_MIN_TFS  = 1       # Same as v10
 CONFIDENCE_MIN = 25.0   # Same as v10
-TOP_SYMBOLS = 30        # Same as v10
+TOP_SYMBOLS = 15        # Same as v10
 
 # ===== BYBIT PUBLIC ENDPOINTS =====
 BYBIT_KLINES = "https://api.bybit.com/v5/market/kline"

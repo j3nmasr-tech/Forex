@@ -41,7 +41,7 @@ WEIGHT_VOLUME = 0.10    # Volume
 MIN_TF_SCORE  = 25      # Same as v10
 CONF_MIN_TFS  = 1       # Same as v10
 CONFIDENCE_MIN = 25.0   # Same as v10
-TOP_SYMBOLS = 15        # Same as v10
+TOP_SYMBOLS = 50        # Same as v10
 
 # ===== BYBIT PUBLIC ENDPOINTS =====
 BYBIT_KLINES = "https://api.bybit.com/v5/market/kline"
@@ -366,7 +366,7 @@ def map_higher_tf(entry_tf):
 def calculate_swing_tp_sl(entry_price, entry_tf, direction, symbol):
     """
     Calculate TP/SL based on swing structure
-    Returns: (sl, tp1, tp2, tp3, tp_sources)
+    Returns: (sl, tp1, tp2, tp3, tp_sources, higher_tfs)
     """
     # Get higher timeframe mapping
     higher_tfs = map_higher_tf(entry_tf)
@@ -806,8 +806,8 @@ def check_trades():
         if side == "BUY":
             if not t["tp1_taken"] and p >= t["tp1"]:
                 t["tp1_taken"] = True
-                t["sl"] = t["entry"]
-                send_update(f"🎯 TP1 HIT at {p} → SL moved to breakeven")
+                # STOP LOSS STAYS AT ORIGINAL LEVEL - NO MOVEMENT
+                send_update(f"🎯 TP1 HIT at {p}")
                 signals_hit_total += 1
                 last_trade_time[t["s"]] = time.time() + 900
                 continue
@@ -839,8 +839,8 @@ def check_trades():
         else:  # SELL
             if not t["tp1_taken"] and p <= t["tp1"]:
                 t["tp1_taken"] = True
-                t["sl"] = t["entry"]
-                send_update(f"🎯 TP1 HIT at {p} → SL moved to breakeven")
+                # STOP LOSS STAYS AT ORIGINAL LEVEL - NO MOVEMENT
+                send_update(f"🎯 TP1 HIT at {p}")
                 signals_hit_total += 1
                 last_trade_time[t["s"]] = time.time() + 900
                 continue
@@ -911,7 +911,8 @@ send_message("✅ SIRTS v10.1 - SINGLE FILTER EDITION\n"
              "🔍 SINGLE ADDED FILTER: Higher TF Conflict Check\n"
              "   - Rejects if next higher TF strongly opposes trade direction\n"
              "   - Threshold: ±15 bull/bear score difference\n"
-             "⚠️ THRESHOLDS: MIN_TF_SCORE=25, CONF_MIN_TFS=1, CONFIDENCE_MIN=25\n"
+             "⚠️ IMPORTANT CHANGE: STOP LOSS DOES NOT MOVE - stays at original level\n"
+             "📊 THRESHOLDS: MIN_TF_SCORE=25, CONF_MIN_TFS=1, CONFIDENCE_MIN=25\n"
              "📊 Expected: Eliminates ~70% of losers, keeps most winners")
 
 try:
